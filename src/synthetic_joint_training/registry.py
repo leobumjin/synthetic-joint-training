@@ -23,6 +23,33 @@ def register(registry, job, folder):
         write_json(registry, data)
 
 
+def reusable_base(registry, job, candidate):
+    """Find the registered immutable artifact before considering new training."""
+    registry, candidate = Path(registry), Path(candidate)
+    if not registry.exists():
+        return None
+    data = read_json(registry)
+    if job['id'] not in data['adapters']:
+        return None
+    entry = registry_entry(registry, job)
+    try:
+        return resolve(registry, job)
+    except FileNotFoundError as exc:
+        # A moved output tree may leave a stale local path. Rebind only when
+        # the relocated final adapter has exactly the registered signature.
+        if not entry.get('repo_id') and (candidate / 'training.json').exists():
+            state = verify_local(candidate, job)
+            if state['adapter_sha256'] == entry['adapter_sha256']:
+                register(registry, job, candidate)
+                return candidate.resolve()
+        raise ValueError(
+            f"Registered base LoRA {job['id']} is unavailable. Registry: {registry}; "
+            f"recorded local path: {entry.get('local_path')}; current output: {candidate}. "
+            'Restore the original registered adapter or correct its path. '
+            'Refusing to retrain or replace this run with different weights.'
+        ) from exc
+
+
 def registry_entry(registry, job):
     registry = Path(registry)
     data = read_json(registry)

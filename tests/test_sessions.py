@@ -249,3 +249,32 @@ def test_joint_worker_uses_fresh_adapters_and_one_original_backbone(tmp_path, mo
         state = read_json(args.output_root / 'runs' / job['id'] / 'training.json')
         assert state['status'] == 'complete'
         assert state['job']['initialization'] == 'original_model'
+
+
+def test_base_worker_reuses_registered_old_root_after_conflicting_retry(tmp_path, monkeypatch):
+    import shutil
+    from synthetic_joint_training.base import train_bases
+    from synthetic_joint_training.registry import register
+    from synthetic_joint_training.train import adapter_signature
+    events, _, _ = training_runtime(monkeypatch)
+    current = job()
+    original = tmp_path / 'old/runs' / current['id']
+    train(current, [{'id': 'q', 'messages': [{'role': 'user', 'content': 'q'},
+                                           {'role': 'assistant', 'content': 'a'}]}], original)
+    registry = tmp_path / 'configs/registry.json'
+    register(registry, current, original)
+    root = tmp_path / 'new'
+    retry = root / 'runs' / current['id']
+    shutil.copytree(original, retry)
+    (retry / 'adapter/adapter_model.safetensors').write_bytes(b'different retry')
+    state = read_json(retry / 'training.json')
+    state['adapter_sha256'] = adapter_signature(retry / 'adapter')
+    write_json(retry / 'training.json', state)
+    write_json(original / 'checkpoints/checkpoint-1/optimizer.pt', {})
+    args = parser().parse_args(['base', '--base-output-root', str(root), '--registry', str(registry)])
+    before = list(events)
+    train_bases({'jobs': [current], 'args': vars(args)})
+    assert events == before  # No tokenizer, backbone, optimizer, or training.
+    assert not (original / 'checkpoints').exists()
+    assert (retry / 'adapter/adapter_model.safetensors').read_bytes() == b'different retry'
+    assert read_json(registry)['adapters'][current['id']]['adapter_sha256'] != state['adapter_sha256']

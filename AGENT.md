@@ -76,6 +76,7 @@ Keep code, shell defaults, tests, and README descriptions consistent when changi
 - Verify dataset and adapter integrity before use. Do not fabricate registry entries, completion markers, training results, or publication revisions.
 - Preserve immutable artifacts and use atomic metadata writes and locks where appropriate.
 - Store base LoRA training artifacts and reference evaluations in `outputs_base_lora/`; store joint LoRAs and repeat controls in `outputs/`. Both roots must be gitignored.
+- Before base training, preflight registry bindings for the entire model grid. Reuse verified registered artifacts even under older roots; only repair moved local paths when signatures match. Never silently overwrite a registered run with retrained weights. Preserve published snapshots and report missing original weights before loading the GPU runtime.
 - Keep recovery checkpoints for incomplete runs. Remove them only after final adapter completion and hash verification; preserve adapters, tokenizers, training metadata, and evaluation artifacts.
 - Keep result discovery and upload discovery aware of both roots, preserve cross-root paired comparisons, and deduplicate identical copied reports. Output path changes must not alter run identities.
 - Base adapters share `<namespace>/synthetic-joint-training-base-loras`; joint LoRAs use a separate configurable shared repository.
