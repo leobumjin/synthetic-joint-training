@@ -41,14 +41,14 @@ def test_nested_splits_and_independent_forks(prepared):
     args = arguments(prepared)
     bundle = load_bundle(args.data_root, 'gsm8k', True)
     jobs, bases = build_plan(args, {'gsm8k': bundle})
-    assert [j['n_examples'] for j in jobs] == [80, 90, 100] * 2
+    assert [j['n_examples'] for j in jobs] == [100, 100]
     args.command = 'synthetic'
     branches, _ = build_plan(args, {'gsm8k': bundle})
     assert len(branches) == 8
     assert len({j['id'] for j in branches}) == 8
-    assert all(j['parent_id'] in bases for j in branches)
-    assert len({j['parent_id'] for j in branches if j['mode'] == 'addition'}) == 2
-    assert all(j['n_examples'] + count(100, j['benchmark_percent']) == 100
+    assert all(j['reference_id'] in bases for j in branches)
+    assert len({j['reference_id'] for j in branches if j['mode'] == 'addition'}) == 2
+    assert all(j['n_examples'] == 100
                for j in branches if j['mode'] == 'replacement')
     rows = bundle[2]
     assert rows[:80] == rows[:90][:80]
@@ -148,7 +148,7 @@ def test_conservative_answer_scoring():
 
 def test_shell_dry_run_both_modes(prepared):
     root, output, registry = prepared
-    for script, expected in [('run_base_lora.sh', 6), ('run.sh', 8)]:
+    for script, expected in [('run_base_lora.sh', 2), ('run.sh', 8)]:
         result = subprocess.run(['bash', 'shells/' + script, '--dry-run', '--models', 'test/model',
             '--revision', SHA, '--seeds', '0', '--data-root', str(root), '--output-root', str(output),
             '--registry', str(registry)], text=True, capture_output=True, check=True)
@@ -159,9 +159,19 @@ def test_shell_dry_run_both_modes(prepared):
 
 def test_orchestrator_continuation_and_reporting(prepared, monkeypatch, capsys):
     root, output, registry = prepared
-    captured = []
+    captured, phases = [], []
 
     def worker(action, payload, interpreter, folder):
+        if action in ('train-base', 'eval-base', 'train-joint', 'eval-joint'):
+            phases.append(action)
+            selected = payload['jobs'] if action.startswith('train-') else payload.get('originals', []) + payload.get('references', []) + payload['jobs']
+            for entry in selected:
+                phase_root = Path(payload['args']['output_root' if entry['synthetic_id'] else 'base_output_root'])
+                destination = phase_root / 'runs' / entry['id']
+                worker('train' if action.startswith('train-') else 'eval', {'job': entry}, interpreter, destination)
+                if action == 'train-base':
+                    register(Path(payload['args']['registry']), entry, destination)
+            return
         job = payload['job']
         captured.append((action, job, payload.get('parent')))
         if action == 'train':
@@ -184,30 +194,33 @@ def test_orchestrator_continuation_and_reporting(prepared, monkeypatch, capsys):
               '--output-root', str(output), '--base-output-root', str(output.parent / 'outputs_base_lora'),
               '--registry', str(registry)]
     main(['base', *common])
+    assert phases == ['train-base', 'eval-base']
+    assert [action for action, _, _ in captured] == ['train'] * 2 + ['eval'] * 3
     captured.clear()
     main(['synthetic', *common, '--synthetic-learning-rate', '1e-5'])
     training = [(j, parent) for action, j, parent in captured if action == 'train']
     assert len(training) == 8
     base_output = output.parent / 'outputs_base_lora'
-    assert len(list(base_output.glob('runs/*/training.json'))) == 6
+    assert len(list(base_output.glob('runs/*/training.json'))) == 2
     assert len(list(output.glob('runs/*/training.json'))) == 8
     assert all(read_json(path)['job']['synthetic_id'] is None for path in base_output.glob('runs/*/training.json'))
     assert all(read_json(path)['job']['synthetic_id'] for path in output.glob('runs/*/training.json'))
-    assert all(parent and '/runs/' in parent for _, parent in training)
+    assert all(parent is None for _, parent in training)
+    assert all(j['initialization'] == 'original_model' for j, _ in training)
     assert all(j['recipe']['learning_rate'] == 1e-5 and j['base_recipe']['learning_rate'] == 2e-5 for j, _ in training)
-    assert len({parent for j, parent in training if j['mode'] == 'addition'}) == 2
+    assert len({j['reference_id'] for j, _ in training if j['mode'] == 'addition'}) == 2
     results_main(['--output-root', str(output), '--base-output-root', str(output.parent / 'outputs_base_lora'),
                   '--bootstrap-samples', '20'])
     text = capsys.readouterr().out
     assert '+25.00' in text and 'Δ B100' in text and 'CI[' in text
-    assert 'complete: 14' in text
+    assert 'complete: 10' in text
     # A copied legacy base tree must not double-count seed results or progress.
     import shutil
     shutil.copytree(base_output / 'runs', output / 'runs', dirs_exist_ok=True)
     results_main(['--output-root', str(output), '--base-output-root', str(base_output)])
     copied = capsys.readouterr().out
-    assert 'complete: 14' in copied
-    assert 'completed evaluation reports: 15' in copied
+    assert 'complete: 10' in copied
+    assert 'completed evaluation reports: 11' in copied
 
 
 def test_replacement_rounding_exact_total():
@@ -276,7 +289,7 @@ def test_evaluation_freezes_outputs_and_reuses_completed_report(prepared, monkey
         def __init__(self, **kwargs):
             creations.append(kwargs)
 
-        def generate(self, prompts, params, lora_request):
+        def generate(self, prompts, params, lora_request, use_tqdm=False):
             return [SimpleNamespace(outputs=[SimpleNamespace(text=json.dumps({'answer': str(i)}),
                     token_ids=[1, 2], finish_reason='stop')]) for i in range(len(prompts))]
 
@@ -297,3 +310,15 @@ def test_evaluation_freezes_outputs_and_reuses_completed_report(prepared, monkey
     assert len(read_rows(reports[0].parent / 'CoT.jsonl')) == 4
     evaluate(job, bundle[3], folder, None, args)
     assert len(creations) == 1  # Cached report never initializes a GPU engine again.
+
+
+def test_joint_train_only_needs_no_b100_registry(prepared, monkeypatch):
+    root, output, registry = prepared
+    captured = []
+    monkeypatch.setattr('synthetic_joint_training.cli.spawn', lambda action, payload, *unused: captured.append((action, payload)))
+    main(['synthetic', '--stage', 'train', '--models', 'test/model', '--revision', SHA,
+          '--seeds', '0', '--data-root', str(root), '--output-root', str(output),
+          '--registry', str(registry)])
+    assert not registry.exists()
+    assert len(captured) == 1 and captured[0][0] == 'train-joint'
+    assert all(j['initialization'] == 'original_model' and 'parent_id' not in j for j in captured[0][1]['jobs'])

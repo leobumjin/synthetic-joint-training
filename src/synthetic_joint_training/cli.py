@@ -1,4 +1,4 @@
-"""Shared CLI for base creation and independent synthetic continuations."""
+"""CLI for benchmark-only references and independent joint-SFT runs."""
 import argparse
 import copy
 import json
@@ -8,9 +8,9 @@ import subprocess
 import sys
 
 from .data import load_bundle, synthetic_name
-from .io import read_json, write_json, lock
-from .plan import build_plan, digest, ranks
-from .registry import register, resolve, publish, registry_entry, DEFAULT_BASE_REPO
+from .io import read_json, write_json
+from .plan import build_plan, digest, ranks, reidentify
+from .registry import publish, registry_entry, DEFAULT_BASE_REPO
 
 
 def parser():
@@ -22,21 +22,23 @@ def parser():
     p.add_argument('--synthetic', nargs='*', help='Prepared dataset names or name=file specs; default: all prepared datasets')
     p.add_argument('--seeds', type=int, nargs='+', default=[0, 1, 2])
     p.add_argument('--control', choices=('none', 'benchmark-repeat'), default='none',
-                   help='Addition arms only: repeat benchmark to nearest whole-example synthetic input-token budget')
+                   help='Addition arms only: repeat benchmark to nearest whole-example full joint input-token budget')
     p.add_argument('--mode', choices=('replacement', 'addition', 'all'), default='all')
     p.add_argument('--stage', choices=('train', 'eval', 'all'), default='all')
     p.add_argument('--data-root', type=Path, default=Path('data'))
     p.add_argument('--output-root', type=Path, default=Path('outputs'),
-                   help='Synthetic continuation output root (also searched for legacy mixed runs)')
+                   help='Joint SFT output root (also searched for legacy mixed runs)')
     p.add_argument('--base-output-root', type=Path, default=Path('outputs_base_lora'),
                    help='Base LoRA and reference evaluation output root')
     p.add_argument('--registry', type=Path, default=Path('configs/base_lora_registry.json'))
-    p.add_argument('--epochs', type=float, default=1.0, help='Benchmark checkpoint recipe; must match registry')
-    p.add_argument('--synthetic-epochs', type=float, default=1.0)
-    p.add_argument('--synthetic-learning-rate', type=float, default=None, help='Default: same as benchmark')
+    p.add_argument('--epochs', type=float, default=5.0, help='Benchmark checkpoint recipe; must match registry')
+    p.add_argument('--joint-epochs', '--synthetic-epochs', dest='synthetic_epochs', type=float,
+                   help='Joint SFT epochs; default: same as benchmark-only --epochs')
+    p.add_argument('--joint-learning-rate', '--synthetic-learning-rate', dest='synthetic_learning_rate',
+                   type=float, default=None, help='Joint SFT learning rate; default: same as benchmark')
     p.add_argument('--learning-rate', type=float, default=2e-5)
-    p.add_argument('--batch-size', type=int, default=1)
-    p.add_argument('--gradient-accumulation', type=int, default=16)
+    p.add_argument('--batch-size', type=int, default=8)
+    p.add_argument('--gradient-accumulation', type=int, default=2)
     p.add_argument('--max-length', type=int, default=4096)
     p.add_argument('--lora-ranks', type=int, nargs='+', default=[16, 32])
     p.add_argument('--lora-rank', type=int, help='Select one rank; overrides --lora-ranks')
@@ -50,6 +52,7 @@ def parser():
     p.add_argument('--prompt-styles', nargs='+', choices=('Direct', 'CoT'), default=['Direct', 'CoT'])
     p.add_argument('--direct-max-tokens', type=int, default=256)
     p.add_argument('--cot-max-tokens', type=int, default=2048)
+    p.add_argument('--eval-batch-size', type=int, default=64, help='Prompts per inference batch/progress update')
     p.add_argument('--eval-seed', type=int, default=42)
     p.add_argument('--tensor-parallel-size', type=int, default=1)
     p.add_argument('--gpu-memory-utilization', type=float, default=0.85)
@@ -67,14 +70,16 @@ def parser():
 
 
 def validate(p, args):
-    positive = ('epochs', 'synthetic_epochs', 'learning_rate', 'batch_size', 'gradient_accumulation',
-                'max_length', 'direct_max_tokens', 'cot_max_tokens', 'tensor_parallel_size')
+    positive = ('epochs', 'learning_rate', 'batch_size', 'gradient_accumulation',
+                'max_length', 'eval_batch_size', 'direct_max_tokens', 'cot_max_tokens', 'tensor_parallel_size')
     if any(getattr(args, k) <= 0 for k in positive) or any(s < 0 for s in args.seeds):
         p.error('Training sizes/rates must be positive and seeds nonnegative')
     if any(rank <= 0 for rank in ranks(args)) or len(set(ranks(args))) != len(ranks(args)):
         p.error('LoRA ranks must be positive and unique')
     if args.lora_alpha is not None and args.lora_alpha <= 0:
         p.error('LoRA alpha must be positive')
+    if args.synthetic_epochs is not None and args.synthetic_epochs <= 0:
+        p.error('Joint epochs must be positive')
     if args.synthetic_learning_rate is not None and args.synthetic_learning_rate <= 0:
         p.error('Synthetic learning rate must be positive')
     if not 0 <= args.lora_dropout < 1 or not 0 <= args.warmup_ratio < 1 or args.weight_decay < 0:
@@ -130,7 +135,7 @@ def execute(args, p, bundles):
         for name, bundle in bundles.items():
             if not any(r['split'] == args.eval_split for r in bundle[3]):
                 p.error(f'{name} has no {args.eval_split} split; choose a compatible evaluation split')
-    if args.base_lora_repo and not args.dry_run:
+    if args.base_lora_repo and args.stage in ('eval', 'all') and not args.dry_run:
         from huggingface_hub import hf_hub_download
         args.registry = Path(hf_hub_download(repo_id=args.base_lora_repo, filename='registry.json',
                              revision=args.base_lora_revision, repo_type='model'))
@@ -145,20 +150,16 @@ def execute(args, p, bundles):
         jobs, bases = build_plan(args, bundles)
         if args.command == 'synthetic':
             for job in jobs:
-                # Synthetic hyperparameters never change the identity of the parent checkpoint.
                 if args.synthetic_selection is not None:
                     job['synthetic_name'] = args.synthetic_selection
-                job['base_recipe'] = job['recipe'].copy()
-                job['recipe'] = {**job['recipe'], 'epochs': args.synthetic_epochs,
-                                 'learning_rate': args.synthetic_learning_rate or args.learning_rate}
-                job['id'] = digest({k: v for k, v in job.items() if k not in ('id', 'n_examples', 'mode')})
+                    reidentify(job)
         if args.command == 'synthetic' and args.control == 'benchmark-repeat':
             controls = []
             for job in jobs:
                 if job['mode'] == 'addition':
                     control = {**job, 'control_kind': 'benchmark-repeat', 'mode': 'addition-control',
                                'budget_policy': 'nearest_whole_example_input_tokens'}
-                    control['id'] = digest({k: v for k, v in control.items() if k not in ('id', 'n_examples', 'mode')})
+                    reidentify(control)
                     controls.append(control)
             jobs += controls
         if args.dry_run:
@@ -168,70 +169,36 @@ def execute(args, p, bundles):
                 'command': args.command, 'synthetic': args.synthetic_selection, 'stage': args.stage, 'jobs': jobs}, indent=2))
             continue
         active_root.mkdir(parents=True, exist_ok=True)
-        if args.command == 'synthetic':
-            # Resolve every required parent before any expensive training starts.
-            parent_ids = {j['parent_id'] for j in jobs}
-            parent_ids.update(key for key, base in bases.items() if base['benchmark_percent'] == 100)
-            parents = {key: registry_entry(args.registry, bases[key]) for key in parent_ids}
-        else:
-            parents = {}
+        if args.command == 'synthetic' and args.stage in ('eval', 'all'):
+            # B100 is an evaluation reference, never an initialization checkpoint.
+            for reference in bases.values():
+                registry_entry(args.registry, reference)
         if args.stage in ('train', 'all'):
             plan_identity = {'command': args.command, 'jobs': jobs}
             write_json(active_root / 'plans' / f'{digest(plan_identity)}.json', plan_identity)
-        loaded_parents = {}
-        def load_parent(key):
-            if key not in loaded_parents:
-                loaded_parents[key] = resolve(args.registry, bases[key])
-            return loaded_parents[key]
         payload_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
-        for job in jobs:
-            folder = active_root / 'runs' / job['id']
-            with lock(active_root / '.locks' / f"{job['id']}.lock"):
-                print(f"{args.command}: {job['benchmark']} B{job['benchmark_percent']} "
-                      f"S{job['synthetic_percent']} rank={job['recipe']['lora_rank']} "
-                      f"alpha={job['recipe']['lora_alpha']} seed={job['seed']} id={job['id'][:12]}", flush=True)
-                write_json(folder / 'job.json', job)
-                parent = (load_parent(job['parent_id'])
-                          if job.get('parent_id') in parents else None)
-                payload = {'job': job, 'args': payload_args, 'output': str(folder),
-                           'parent': str(parent) if parent else None}
-                if args.stage in ('train', 'all'):
-                    spawn('train', payload, args.train_python, folder)
-                    if args.command == 'base':
-                        register(args.registry, job, folder)
-                if args.stage in ('eval', 'all'):
-                    if args.command == 'base':
-                        adapter_folder = resolve(args.registry, job)
-                        payload['adapter'] = str(adapter_folder / 'adapter')
-                    else:
-                        state = read_json(folder / 'training.json')
-                        from .train import adapter_signature
-                        if (state.get('status') != 'complete' or state['job'] != job or
-                                adapter_signature(folder / 'adapter') != state['adapter_sha256']):
-                            raise ValueError('Synthetic training is incomplete or adapter changed')
-                        payload['adapter'] = str(folder / 'adapter')
-                    spawn('eval', payload, args.inference_python, folder)
-                if args.push_to_hub:
-                    publish(args.registry, job, args.hf_namespace, repo_name=args.hf_repo)
+        phase_folder = active_root / 'phases' / digest({'jobs': [j['id'] for j in jobs]})
+        phase_payload = {'jobs': jobs, 'args': payload_args}
+        if args.stage in ('train', 'all'):
+            spawn('train-base' if args.command == 'base' else 'train-joint',
+                  phase_payload, args.train_python, phase_folder)
         if args.stage in ('eval', 'all'):
-            # Evaluate parent checkpoints and unadapted model as well, so deltas are available.
-            relevant = [] if args.command == 'base' else [bases[k] for k in sorted(parents)]
-            for base in relevant:
-                folder = args.base_output_root / 'runs' / base['id']
-                with lock(args.base_output_root / '.locks' / f"{base['id']}.lock"):
-                    parent = load_parent(base['id'])
-                    payload = {'job': base, 'args': payload_args, 'output': str(folder),
-                               'adapter': str(parent / 'adapter')}
-                    spawn('eval', payload, args.inference_python, folder)
-            for name, bundle in bundles.items():
-                exemplar = next(b for b in bases.values() if b['benchmark'] == name)
+            for reference in bases.values():
+                registry_entry(args.registry, reference)
+            originals = []
+            for name in bundles:
+                exemplar = next(j for j in bases.values() if j['benchmark'] == name)
                 original = {**exemplar, 'benchmark_percent': 0, 'synthetic_percent': 0,
                             'seed': None, 'kind': 'unadapted'}
                 original['id'] = digest({k: v for k, v in original.items() if k != 'id'})
-                folder = args.base_output_root / 'runs' / original['id']
-                with lock(args.base_output_root / '.locks' / f"{original['id']}.lock"):
-                    spawn('eval', {'job': original, 'args': payload_args, 'output': str(folder),
-                                   'adapter': None}, args.inference_python, folder)
+                originals.append(original)
+            spawn('eval-base' if args.command == 'base' else 'eval-joint',
+                  {**phase_payload, 'originals': originals,
+                   'references': list(bases.values()) if args.command == 'synthetic' else []},
+                  args.inference_python, phase_folder)
+        if args.push_to_hub:
+            for reference in bases.values():
+                publish(args.registry, reference, args.hf_namespace, repo_name=args.hf_repo)
         # Restore requested revision so each model resolves its own commit.
         args.revision = requested_revision
 

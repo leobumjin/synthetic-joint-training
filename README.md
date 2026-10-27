@@ -2,9 +2,9 @@
 
 # Synthetic Joint Training
 
-**How much does synthetic data help after benchmark fine-tuning?**
+**How much does synthetic data help when mixed with benchmark training?**
 
-A reproducible experiment toolkit for sequential LoRA training, paired evaluation, and reusable checkpoints.
+A reproducible experiment toolkit for joint LoRA training, paired evaluation, and reusable checkpoints.
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?style=flat-square&logo=python&logoColor=white)](pyproject.toml)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.8.0-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)](pyproject.toml)
@@ -17,13 +17,13 @@ A reproducible experiment toolkit for sequential LoRA training, paired evaluatio
 
 ---
 
-Measure whether your synthetic dataset can **replace benchmark examples** or **add value after benchmark SFT**. Each condition independently continues a matching benchmark LoRA, then evaluates on the same heldout questions.
+Measure whether your synthetic dataset can **replace benchmark examples** or **improve training when added to them**. All four mixtures start independently from the original model and evaluate on the same heldout questions.
 
 | Compare | Control | Inspect | Reuse |
 |---|---|---|---|
 | Replacement and addition | Frozen data, paired seeds, two ranks | Direct + CoT, extraction and format errors | Shared HF repositories, selective downloads |
 
-The protocol is **benchmark SFT → synthetic SFT**. The two datasets are used in consecutive stages, with a fresh optimizer for each synthetic continuation.
+The protocol is **joint SFT from the original model**. Benchmark and synthetic examples are shuffled together in one training run. A separate B100 benchmark-only LoRA provides the evaluation reference; joint runs never initialize from it.
 
 ## Quick Start
 
@@ -58,7 +58,7 @@ bash shells/run.sh --synthetic custom --mode all --dry-run
 
 | Default scope | Base training | Synthetic training | Evaluation |
 |---|---|---|---|
-| One model, one benchmark, one synthetic dataset | 18 jobs | 24 jobs | Direct + CoT |
+| One model, one benchmark, one synthetic dataset | 6 jobs | 24 jobs | Direct + CoT |
 
 The default grid uses ranks **16/32**, training seeds **0/1/2**, and a frozen custom split capped at **1,000 train / 3,000 test** examples. Dry runs make no network or GPU requests; source data must already be prepared.
 
@@ -70,7 +70,7 @@ bash shells/run.sh --synthetic custom --mode all --resume
 bash shells/print_results.sh
 ```
 
-Completed training and evaluation artifacts are reused. To use published base adapters, set `BASE_LORA_REPO=<namespace>/synthetic-joint-training-base-loras` for `run.sh` and match the published recipe and model revision. [Checkpoint reuse →](#download-only-the-needed-checkpoints)
+Completed training and evaluation artifacts are reused. To use published B100 evaluation references, set `BASE_LORA_REPO=<namespace>/synthetic-joint-training-base-loras` for `run.sh` and match the published recipe and model revision. [Checkpoint reuse →](#download-only-the-needed-checkpoints)
 
 <details>
 <summary><strong>Try the planning workflow without a GPU</strong></summary>
@@ -103,7 +103,8 @@ These fixtures validate the workflow, not benchmark performance. [Verification d
 - [Local output layout](#local-output-layout)
 - [Base LoRA training](#base-lora-training)
 - [Hugging Face storage and incremental upload](#hugging-face-storage-and-incremental-upload)
-- [Synthetic continuation training](#synthetic-continuation-training)
+- [Base execution and progress](#base-execution-and-progress)
+- [Joint synthetic training](#joint-synthetic-training)
 - [Evaluation and results](#evaluation-and-results)
 - [Offline verification](#offline-verification)
 - [Development](#development)
@@ -116,46 +117,52 @@ These fixtures validate the workflow, not benchmark performance. [Verification d
 
 ```mermaid
 flowchart LR
-    M["Original model"] --> B80["B80 · benchmark SFT"]
-    M --> B90["B90 · benchmark SFT"]
-    M --> B100["B100 · benchmark SFT"]
-    B80 --> R20["+ S20 · replacement"]
-    B90 --> R10["+ S10 · replacement"]
-    B100 --> A10["+ S10 · addition"]
-    B100 --> A20["+ S20 · addition"]
-    B100 -.-> REF["B100 reference"]
-
-    classDef base fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a
-    classDef replacement fill:#f5f3ff,stroke:#8b5cf6,color:#4c1d95
-    classDef addition fill:#ecfdf5,stroke:#10b981,color:#064e3b
-    class B80,B90,B100 base
-    class R10,R20 replacement
-    class A10,A20 addition
+    M["Original model"] --> B100["B100 · benchmark-only reference"]
+    M --> R10["B90 + S10 · joint replacement"]
+    M --> R20["B80 + S20 · joint replacement"]
+    M --> A10["B100 + S10 · joint addition"]
+    M --> A20["B100 + S20 · joint addition"]
+    B100 -. "paired evaluation" .-> REF["Compare all four mixtures"]
+    R10 --> REF
+    R20 --> REF
+    A10 --> REF
+    A20 --> REF
 ```
 
 All percentages refer to the selected benchmark training set of size `N`. By default, source splits are pooled and repartitioned into 25% train and 75% test, capped at 1,000 training examples and 3,000 test examples. The complete selected training set is B100.
 
 | Stage | Conditions |
 |---|---|
-| Base LoRAs | B80, B90, B100 |
-| Replacement | B90 → S10, B80 → S20 |
-| Addition | B100 → S10, B100 → S20 |
+| Benchmark-only LoRAs | B100 |
+| Replacement | B90 + S10, B80 + S20 |
+| Addition | B100 + S10, B100 + S20 |
 
-The final comparison has five conditions: B100 and the four synthetic continuations. Results also include the unadapted model and the B80/B90 starting checkpoints.
+The final comparison has five conditions: B100 and four joint mixtures. Results also include the unadapted model. B80/B90 denote training subsets; no separate B80/B90 adapters are trained.
 
 For each model and benchmark, the default grid creates:
 
-- **18 base LoRAs:** 3 benchmark fractions × 2 ranks × 3 training seeds.
-- **24 synthetic continuations per synthetic dataset:** 4 conditions × 2 ranks × 3 seeds.
-- **42 trained artifacts for one synthetic dataset.** Additional synthetic datasets reuse the same 18 base LoRAs.
+- **6 benchmark-only LoRAs:** B100 × 2 ranks × 3 training seeds.
+- **24 joint LoRAs per synthetic dataset:** 4 conditions × 2 ranks × 3 seeds.
+- **30 trained artifacts for one synthetic dataset.** Additional synthetic datasets share the same six B100 evaluation references.
 
 Benchmark subsets are nested: `B80 ⊂ B90 ⊂ B100`. Synthetic subsets use prefixes of one frozen order. Data selection and training use separate seeds.
 
 Benchmark counts are `floor(N × fraction)`. Replacement uses `N − benchmark_count` synthetic examples so the combined count is exactly `N`, including rounding. Addition uses `floor(N × synthetic_fraction)`. With `N=1,000`, synthetic stages use 100 or 200 examples.
 
-Every continuation starts independently from its matching base LoRA. S20 does not continue from S10. The existing adapter weights remain trainable, while the synthetic stage starts with a **fresh optimizer and scheduler**. Within a stage, `--resume` restores the latest saved training checkpoint, including optimizer state. A stage interrupted before its first checkpoint restarts from the beginning.
+Every mixture starts from the original model with a fresh LoRA, optimizer, and scheduler. B100 adapters are used only for paired evaluation. Within a run, `--resume` restores its own latest training checkpoint, including optimizer state; a run interrupted before its first checkpoint restarts from the beginning.
 
-Defaults are one epoch per stage, no packing, and loss only on the final assistant response. Prompt tokens and earlier assistant turns are masked out of the loss. Overlength examples fail explicitly; they are never silently dropped or truncated. Changing the training recipe creates a different run identity.
+Defaults are five epochs for both benchmark-only and joint SFT, no packing, and loss only on the final assistant response. Prompt tokens and earlier assistant turns are masked out of the loss. Overlength examples fail explicitly; they are never silently dropped or truncated. Changing the training recipe creates a different run identity.
+
+The per-device micro-batch is 8 with 2 gradient accumulation steps, giving an effective batch of 16 on one GPU. Raising the micro-batch while reducing accumulation preserves the effective batch; it does not by itself increase the amount learned. More epochs increase repeated exposure and optimizer updates. These defaults are a starting recipe, not a guarantee of convergence.
+
+```bash
+EPOCHS=5
+JOINT_EPOCHS=  # Empty: inherit EPOCHS
+BATCH_SIZE=8
+GRADIENT_ACCUMULATION=2
+```
+
+For example, 240 benchmark examples take approximately 15 optimizer updates per epoch at effective batch 16, or 75 over five epochs. Synthetic percentages describe unique examples; five joint epochs expose each selected benchmark and synthetic example five times. Addition runs contain more examples and therefore more optimizer updates at the same epoch count. Existing B100 checkpoints with the same recipe remain reusable; older sequential synthetic artifacts have separate protocol identities.
 
 This is an **example-count comparison**, not an exact compute comparison. Different sequence lengths produce different token and compute budgets. Each `training.json` records example counts, input and supervised tokens per epoch, optimizer steps, Trainer-observed input tokens, selected example IDs, hashes, and library versions. Trainer-observed tokens can include padding.
 
@@ -172,7 +179,7 @@ The default rank grid keeps `alpha/rank=2`:
 | 16 | 32 |
 | 32 | 64 |
 
-Parent and continuation adapters use the same rank and alpha. Rank is included in the recipe and run identity; parent selection and paired comparisons stay within the matching recipe. The result table displays Rank and Alpha explicitly. Learning rate, epochs, data, seeds, and target modules otherwise remain fixed across ranks.
+Benchmark-only and joint adapters use the same rank and alpha. Rank is included in the recipe and run identity; paired comparisons stay within matching ranks, seeds, and reference recipes. The result table displays Rank and Alpha explicitly. Learning rate, epochs, data, seeds, and target modules otherwise remain fixed across ranks.
 
 ```bash
 # Run both configured ranks.
@@ -190,7 +197,7 @@ The default experiment reports both ranks. Selecting a rank based on performance
 
 ## Entry points
 
-**Configure → Prepare → Train bases → Continue on synthetic data → Evaluate → Share**
+**Configure → Prepare → Train B100 references → Train joint mixtures → Evaluate → Share**
 
 | Script | Purpose |
 |---|---|
@@ -198,7 +205,7 @@ The default experiment reports both ranks. Selecting a rank based on performance
 | [prepare_dataset.sh](shells/prepare_dataset.sh) | Download source benchmarks, freeze subsets, and validate synthetic pools. |
 | [env.sh](shells/env.sh) | Configure models, benchmarks, synthetic datasets, seeds, training, and evaluation. |
 | [run_base_lora.sh](shells/run_base_lora.sh) | Train/evaluate base LoRAs, register them, and optionally publish them. |
-| [run.sh](shells/run.sh) | Load matching base LoRAs and run replacement/addition continuations. |
+| [run.sh](shells/run.sh) | Train replacement/addition mixtures from the original model. |
 | [hf_push_lora_parmas.sh](shells/hf_push_lora_parmas.sh) | Upload completed adapters without running training or evaluation. |
 | [print_results.sh](shells/print_results.sh) | Discover saved results and report seed statistics and paired improvements. |
 
@@ -206,7 +213,7 @@ The default experiment reports both ranks. Selecting a rank based on performance
 
 ## Installation
 
-Use Linux with Python 3.11 or 3.12 and a working CUDA environment. The pinned runtime includes PyTorch 2.8.0, Transformers 4.57.6, PEFT 0.17.1, and vLLM 0.11.0. SFT uses Transformers Trainer; inference uses vLLM in a separate worker process.
+Use Linux with Python 3.11 or 3.12 and a working CUDA environment. The pinned runtime includes PyTorch 2.8.0, Transformers 4.57.6, PEFT 0.17.1, and vLLM 0.11.0. SFT uses Transformers Trainer; inference uses vLLM in a separate worker process. Base training runs all configured adapters for a model in one persistent training worker, followed by one persistent inference worker.
 
 Default SFT assumes the model fits on one device. Sharded training for larger models is not implemented. Tensor-parallel inference is supported.
 
@@ -294,7 +301,7 @@ Preparing synthetic datasets later with the same benchmark settings preserves th
 
 ## Local output layout
 
-Base artifacts and synthetic continuations use separate roots. Both directories are excluded from Git.
+Base artifacts and joint LoRAs use separate roots. Both directories are excluded from Git.
 
 ```text
 outputs_base_lora/                 # Reusable benchmark checkpoints and reference scores
@@ -307,7 +314,7 @@ outputs_base_lora/                 # Reusable benchmark checkpoints and referenc
 │   └── evaluations/
 └── hf_uploads.json                # Written by the upload-only script
 
-outputs/                           # Synthetic continuations and optional repeat controls
+outputs/                           # Joint LoRAs and optional repeat controls
 ├── plans/
 ├── runs/<run-id>/
 │   ├── job.json
@@ -318,9 +325,9 @@ outputs/                           # Synthetic continuations and optional repeat
 └── hf_uploads.json                # Written by the upload-only script
 ```
 
-The base root also holds unadapted-model evaluations and parent/B100 reference evaluations requested by synthetic runs. Evaluation-only runs need not have training files or adapters in their local run folders.
+The base root also holds unadapted-model evaluations and B100 reference evaluations requested by synthetic runs. Evaluation-only runs need not have training files or adapters in their local run folders.
 
-Override paths through `BASE_OUTPUT_ROOT` / `OUTPUT_ROOT`, or `--base-output-root` / `--output-root`. `run_base_lora.sh` writes to the base root; `run.sh` writes continuations to the synthetic root and references to the base root. Run identities do not depend on these paths.
+Override paths through `BASE_OUTPUT_ROOT` / `OUTPUT_ROOT`, or `--base-output-root` / `--output-root`. `run_base_lora.sh` writes to the base root; `run.sh` writes joint runs to the synthetic root and references to the base root. Run identities do not depend on these paths.
 
 `print_results.sh` searches both roots and pairs matching references across them. The uploader also searches both roots and registered local adapter paths. Identical copied reports are counted once. Existing mixed-root results remain readable and uploadable; files are not automatically moved. To resume base training in an older location, set `BASE_OUTPUT_ROOT` to that location.
 
@@ -360,7 +367,7 @@ HF_NAMESPACE=my-account bash shells/hf_push_lora_parmas.sh --dry-run
 HF_NAMESPACE=my-account DATA_PYTHON="$PWD/.venv/bin/python" \
   bash shells/hf_push_lora_parmas.sh
 
-# Include synthetic continuations.
+# Include joint LoRAs.
 HF_NAMESPACE=my-account DATA_PYTHON="$PWD/.venv/bin/python" \
   bash shells/hf_push_lora_parmas.sh --kind all
 ```
@@ -388,13 +395,13 @@ my-account/synthetic-joint-training-base-loras/
 
 Use `HF_REPO` or `--hf-repo` to change the base repository name. Model paths include the original namespace to distinguish models with the same short name. Rank and other recipe settings are distinguished by the full run hash.
 
-Synthetic continuations use the separate shared repository `synthetic-joint-training-synthetic-loras`. Set `HF_SYNTHETIC_REPO` or `--hf-synthetic-repo` to organize repositories by synthetic dataset. Their checkpoint paths include conditions such as `b80-synth20`.
+Joint LoRAs use the separate shared repository `synthetic-joint-training-synthetic-loras`. Set `HF_SYNTHETIC_REPO` or `--hf-synthetic-repo` to organize repositories by synthetic dataset. Their checkpoint paths include conditions such as `b80-synth20`.
 
 Only the selected checkpoint folder is uploaded. Unchanged registered runs are skipped. Different content under an existing run ID fails instead of overwriting the registered artifact. Different data or recipes create new run-hash paths. Other checkpoint folders are preserved.
 
 The shared `registry.json` records each checkpoint's `repo_id`, `checkpoint_path`, adapter `subfolder`, immutable weight `revision`, file hashes, and recipe. Registry merges preserve existing entries and retry concurrent update conflicts. The weight revision remains pinned even after later uploads. If an upload is interrupted between writing weights and updating the registry, rerun it to finish registration.
 
-Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. The upload-only script records base uploads in `outputs_base_lora/hf_uploads.json` and synthetic uploads in `outputs/hf_uploads.json`. Base uploads also update the local base registry. Local base adapters live at `outputs_base_lora/runs/<run-id>/adapter/`; continuation adapters live at `outputs/runs/<run-id>/adapter/`.
+Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. The upload-only script records base uploads in `outputs_base_lora/hf_uploads.json` and synthetic uploads in `outputs/hf_uploads.json`. Base uploads also update the local base registry. Local base adapters live at `outputs_base_lora/runs/<run-id>/adapter/`; joint adapters live at `outputs/runs/<run-id>/adapter/`.
 
 ### Download only the needed checkpoints
 
@@ -403,13 +410,49 @@ BASE_LORA_REPO=my-account/synthetic-joint-training-base-loras \
   bash shells/run.sh --mode addition
 ```
 
-The loader first fetches the small registry, then downloads only `adapter/*` and `training.json` for each required checkpoint at its pinned commit. For each rank/seed pair, addition reuses one B100 adapter. Replacement loads each parent when needed. Hugging Face caches are reused; original model weights are downloaded separately as needed.
+The loader first fetches the small registry, then downloads only `adapter/*` and `training.json` for each required checkpoint at its pinned commit. Only B100 references needed for evaluation are downloaded. Joint training with `--stage train` requires no base-adapter registry or download; it loads the original model. Hugging Face caches are reused; original model weights are downloaded separately as needed.
 
 A local registry can be selected with `--registry`. Pin a remote registry snapshot with `BASE_LORA_REVISION=<commit-sha>` or `--base-lora-revision`. Required registry entries are checked before training starts. Dry runs do not contact Hugging Face.
 
 Transfers use the [Hugging Face Hub upload API](https://huggingface.co/docs/huggingface_hub/en/guides/upload).
 
-## Synthetic continuation training
+## Base execution and progress
+
+Both baseline and joint workflows use two phases per model (and selected synthetic dataset):
+
+1. **Train all selected LoRAs.** Load the frozen backbone and tokenizer once. Attach one fresh LoRA, create a fresh Trainer/optimizer, train and save it, then unload the adapter **without merging** before moving to the next condition. Original backbone weights remain unchanged. Tokenized examples are cached across nested fractions, ranks, and seeds. Completed adapters are verified and counted as cached work without loading the model.
+2. **Evaluate all selected LoRAs.** Exit the training worker to release its GPU resources, then load one vLLM backbone. Evaluate the unadapted reference and each saved adapter. The inference engine keeps at most one GPU/CPU LoRA slot and uses a unique adapter ID for each checkpoint. Prompts are cached across adapters. Original-model references are separate from the LoRA progress total.
+
+The default B200-oriented micro-batch is **8**, with accumulation **2** to preserve effective batch **16** on one GPU. Benchmark-only and joint runs both use **5 epochs** by default. Set `BATCH_SIZE`, `GRADIENT_ACCUMULATION`, or their CLI equivalents to change this recipe. Larger micro-batches improve parallel work per forward/backward pass but do not guarantee a particular throughput gain.
+
+Progress has two levels. This is an illustrative layout, not recorded benchmark output:
+
+```text
+Base training | Qwen3-4B-Instruct-2507 | gsm8k | B100 | rank=16 alpha=32 | seed=0   0/6 LoRA
+  Steps | gsm8k B100 r16 s0                              0/<optimizer updates>
+
+Base evaluation | Qwen3-4B-Instruct-2507 | gsm8k | B100 | rank=16 alpha=32 | seed=0  0/6 LoRA
+  Inference batches | gsm8k B100 r16 s0 Direct            0/<inference batches>
+  Inference batches | gsm8k B100 r16 s0 CoT               0/<inference batches>
+```
+
+The training step bar initially shows examples, epochs, micro-batch, and effective batch, then displays logged loss. The evaluation outer bar displays Direct/CoT accuracy for the latest adapter. Batch bars show processed examples and running accuracy. vLLM's additional per-request bar is disabled.
+
+```bash
+EVAL_BATCH_SIZE=64
+bash shells/run_base_lora.sh --stage all --resume
+
+# Override the inference chunk size explicitly.
+bash shells/run_base_lora.sh --stage eval --eval-batch-size 64
+```
+
+Inference batches are explicit chunks of evaluation prompts; vLLM still schedules sequences internally. `EVAL_BATCH_SIZE` is independent of training micro-batch and is recorded in evaluation settings. Cached complete reports are reused without loading the inference engine when all requested results already exist.
+
+Base-stage execution now uses training protocol `sequential-direct-json-v2`, which fixes per-adapter seed reset immediately before initialization. New training runs do not silently reuse artifacts from the earlier protocol. Evaluation records `shared-lora-v1` and the inference batch size so older engine configurations remain distinguishable.
+
+Joint runs use the same persistent model-scoped phases, with an outer total of 24 LoRAs for the default grid. Each fresh adapter is unloaded without merging. B100 reference evaluations run outside the joint LoRA progress total. Joint jobs use protocol `joint-direct-json-v1`, keeping legacy sequential results separate.
+
+## Joint synthetic training
 
 ```bash
 bash shells/run.sh --mode all --dry-run
@@ -417,14 +460,14 @@ bash shells/run.sh --mode replacement --resume
 bash shells/run.sh --mode addition --resume
 ```
 
-Model revision, benchmark identity, seed, rank, and base recipe must match the selected parent checkpoint. To change only synthetic-stage epochs or learning rate:
+The B100 evaluation reference must match the model revision, benchmark identity, seed, rank, and reference recipe. All mixtures initialize from the original model. To explicitly change only joint epochs or learning rate:
 
 ```bash
 bash shells/run.sh --mode all \
-  --synthetic-epochs 1 --synthetic-learning-rate 2e-5
+  --joint-epochs 5 --joint-learning-rate 2e-5
 ```
 
-`--epochs` and `--learning-rate` continue to select the base recipe. Training and evaluation can run separately with `--stage train|eval|all`. The default `all` evaluates completed continuations, their parents, B100 references, and the unadapted model.
+`--epochs` and `--learning-rate` define the common recipe and B100 reference selection. Joint overrides default to those values; record explicit overrides when comparing results. Training and evaluation can run separately with `--stage train|eval|all`. Train-only joint runs require no B100 checkpoint. The default `all` evaluates joint adapters, matching B100 references, and the unadapted model.
 
 An optional benchmark-repeat control helps separate synthetic-data effects from extra training:
 
@@ -432,7 +475,7 @@ An optional benchmark-repeat control helps separate synthetic-data effects from 
 bash shells/run.sh --mode addition --control benchmark-repeat --resume
 ```
 
-Each rank/seed pair gets two additional controls starting from B100. Benchmark examples are repeated to the nearest whole-example input-token budget of the matching synthetic stage. This is not exact token or compute matching because examples are not truncated. Differences are recorded under `budget_match` in `training.json`. These controls are additional to the default 24 synthetic training runs.
+Each rank/seed pair gets two additional controls starting from the original model. Benchmark examples are repeated to the nearest whole-example input-token budget of the entire matching joint mixture. This is not exact token or compute matching because examples are not truncated. Differences are recorded under `budget_match` in `training.json`. These controls are additional to the default 24 synthetic training runs.
 
 ## Evaluation and results
 
@@ -448,7 +491,7 @@ Reports include:
 
 - Accuracy, extraction failure, requested-format violation, and generation-length-limit rates.
 - Rank, alpha, available seed counts, mean accuracy, and sample standard deviation.
-- Paired improvements over the matching parent and B100 using the same seed and evaluation questions.
+- Paired improvements over matching B100 using the same seed and evaluation questions. Legacy sequential rows retain their parent deltas and remain separate from joint rows.
 - Optional paired question-bootstrap 95% confidence intervals, conditional on available training seeds.
 - Raw prompts, completions, completion token IDs, and per-question scoring in adjacent JSONL files.
 
@@ -486,7 +529,7 @@ Benchmark normalization and conservative answer extraction originated in `iclr20
 
 Implementation references:
 
-- [PEFT adapter continuation](https://huggingface.co/docs/peft/guides/peft_model_config)
+- [PEFT adapter configuration](https://huggingface.co/docs/peft/guides/peft_model_config)
 - [Transformers Trainer](https://huggingface.co/docs/transformers/main_classes/trainer)
 - [vLLM LoRA inference](https://docs.vllm.ai/en/latest/features/lora/)
 

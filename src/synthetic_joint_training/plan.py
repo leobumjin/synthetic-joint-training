@@ -1,8 +1,11 @@
-"""Deterministic plans; no model libraries or GPUs required."""
-from .data import FRACTIONS, RATIOS, count, synthetic_count
+"""Deterministic benchmark-only and joint-SFT plans; no GPU imports."""
+from .data import RATIOS, count, synthetic_count
 from .io import digest
 
-PROTOCOL = 'sequential-direct-json-v1'
+# Keep the benchmark-only identity compatible with existing B100 artifacts.
+PROTOCOL = 'sequential-direct-json-v2'
+JOINT_PROTOCOL = 'joint-direct-json-v1'
+BASE_FRACTIONS = (100,)
 
 
 def ranks(args):
@@ -29,6 +32,11 @@ def make_job(model, revision, benchmark, data_id, seed, fraction, training, synt
     return {'id': digest(identity), **identity}
 
 
+def reidentify(job):
+    job['id'] = digest({k: v for k, v in job.items() if k not in ('id', 'n_examples', 'mode')})
+    return job
+
+
 def build_plan(args, bundles):
     jobs, bases = [], {}
     for rank in ranks(args):
@@ -39,23 +47,31 @@ def build_plan(args, bundles):
                 if count(n, min(RATIOS)) < 1:
                     raise ValueError('At least 10 benchmark rows are required')
                 for seed in args.seeds:
-                    for fraction in FRACTIONS:
-                        base = make_job(model, args.revision, name, index['benchmark_id'], seed, fraction, recipe(args, rank))
-                        base['n_examples'] = count(n, fraction)
-                        bases[base['id']] = base
-                        if args.command == 'base':
-                            jobs.append(base)
-                    if args.command == 'synthetic':
-                        pairs = []
-                        if args.mode in ('all', 'replacement'):
-                            pairs += [(100 - s, s) for s in RATIOS]
-                        if args.mode in ('all', 'addition'):
-                            pairs += [(100, s) for s in RATIOS]
-                        for fraction, percent in pairs:
-                            base = make_job(model, args.revision, name, index['benchmark_id'], seed, fraction, recipe(args, rank))
-                            job = make_job(model, args.revision, name, index['benchmark_id'], seed, fraction,
-                                           recipe(args, rank), index['synthetic_id'], percent)
-                            job.update(parent_id=base['id'], n_examples=synthetic_count(n, fraction, percent),
-                                       mode='replacement' if fraction < 100 else 'addition')
-                            jobs.append(job)
+                    baseline_recipe = recipe(args, rank)
+                    base = make_job(model, args.revision, name, index['benchmark_id'], seed, 100, baseline_recipe)
+                    base['n_examples'] = n
+                    bases[base['id']] = base
+                    if args.command == 'base':
+                        jobs.append(base)
+                        continue
+                    pairs = []
+                    if args.mode in ('all', 'replacement'):
+                        pairs += [(100 - s, s) for s in RATIOS]
+                    if args.mode in ('all', 'addition'):
+                        pairs += [(100, s) for s in RATIOS]
+                    for fraction, percent in pairs:
+                        joint_recipe = {**baseline_recipe,
+                            'epochs': args.synthetic_epochs if args.synthetic_epochs is not None else args.epochs,
+                            'learning_rate': args.synthetic_learning_rate or args.learning_rate}
+                        job = make_job(model, args.revision, name, index['benchmark_id'], seed, fraction,
+                                       joint_recipe, index['synthetic_id'], percent)
+                        n_benchmark = count(n, fraction)
+                        n_synthetic = synthetic_count(n, fraction, percent)
+                        job.update(protocol=JOINT_PROTOCOL, training_mode='joint',
+                            initialization='original_model', optimizer_policy='fresh_per_run',
+                            reference_id=base['id'], base_recipe=baseline_recipe,
+                            n_benchmark_examples=n_benchmark, n_synthetic_examples=n_synthetic,
+                            n_examples=n_benchmark + n_synthetic,
+                            mode='replacement' if fraction < 100 else 'addition')
+                        jobs.append(reidentify(job))
     return jobs, bases

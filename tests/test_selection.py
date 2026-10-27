@@ -68,7 +68,7 @@ def test_named_datasets_share_base_and_get_separate_plans(tmp_path, capsys):
         output = output.lstrip()[end:]
     assert [p['synthetic'] for p in plans] == ['edit', 'rebuild']
     assert all(len(p['jobs']) == 8 for p in plans)
-    assert {j['parent_id'] for j in plans[0]['jobs']} == {j['parent_id'] for j in plans[1]['jobs']}
+    assert {j['reference_id'] for j in plans[0]['jobs']} == {j['reference_id'] for j in plans[1]['jobs']}
     assert {j['id'] for j in plans[0]['jobs']}.isdisjoint(j['id'] for j in plans[1]['jobs'])
     main(['synthetic', *common, '--synthetic', 'edit=/unused/source/edit.jsonl'])
     assert json.loads(capsys.readouterr().out)['synthetic'] == 'edit'

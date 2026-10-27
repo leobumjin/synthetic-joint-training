@@ -56,7 +56,7 @@ def print_table(headers, rows):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output-root', type=Path, default=Path('outputs'),
-                   help='Synthetic continuation output root (also searched for legacy mixed runs)')
+                   help='Joint SFT output root (also searched for legacy mixed runs)')
     p.add_argument('--base-output-root', type=Path, default=Path('outputs_base_lora'),
                    help='Base LoRA and reference evaluation output root')
     p.add_argument('--models', nargs='+')
@@ -103,7 +103,7 @@ def main(argv=None):
         for r in cohort:
             j = r['job']
             groups[(j.get('control_kind', j.get('kind', 'trained')), j['benchmark_percent'], j['synthetic_percent'],
-                    j['synthetic_id'], digest({'stage': j['recipe'], 'base': j.get('base_recipe', j['recipe']), 'synthetic_name': j.get('synthetic_name')}))].append(r)
+                    j['synthetic_id'], digest({'stage': j['recipe'], 'base': j.get('base_recipe', j['recipe']), 'synthetic_name': j.get('synthetic_name'), 'protocol': j.get('protocol'), 'training_mode': j.get('training_mode')}))].append(r)
         for style in styles:
             print(f'\n{style} · % · mean ± sample SD · deltas in percentage points')
             table = []
@@ -120,11 +120,15 @@ def main(argv=None):
                     full = [b for b in cohort if b['job']['benchmark_percent'] == 100 and
                             not b['job']['synthetic_id'] and b['job']['seed'] == j['seed'] and
                             b['job']['recipe'] == baseline_recipe]
+                    if j.get('reference_id'):
+                        full = [b for b in full if b['job']['id'] == j['reference_id']]
                     if len(full) == 1:
                         pairs_full.append((r, full[0]))
                 metrics = [r['metrics'][style] for r in items]
                 label = ('Base model' if kind == 'unadapted' else
-                         f'B{fraction} → Repeat(S{syn} budget)' if kind == 'benchmark-repeat' else f'B{fraction} → S{syn}')
+                         f'B100 repeat (B{fraction}+S{syn} budget)' if kind == 'benchmark-repeat' else
+                         f'B{fraction} + S{syn} joint' if items[0]['job'].get('training_mode') == 'joint' else
+                         f'B{fraction}' if not syn_id else f'B{fraction} → S{syn} sequential')
                 table.append([label, '—' if kind == 'unadapted' else str(items[0]['job']['recipe']['lora_rank']),
                     '—' if kind == 'unadapted' else str(items[0]['job']['recipe']['lora_alpha']), items[0]['job'].get('synthetic_name') or (syn_id or '-')[:10], recipe_id[:8], str(len(items)),
                     mean_sd([m['accuracy'] for m in metrics]),

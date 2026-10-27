@@ -7,7 +7,7 @@ name = "synthetic-joint-training"
 version = "0.1.0"
 description = "Reproducible benchmark-to-synthetic sequential LoRA experiments"
 requires-python = ">=3.11,<3.13"
-dependencies = []
+dependencies = ["tqdm>=4.66,<5"]
 
 [project.optional-dependencies]
 data = ["huggingface-hub==0.36.0", "pyarrow==21.0.0"]
