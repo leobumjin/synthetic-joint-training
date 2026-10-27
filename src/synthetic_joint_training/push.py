@@ -6,8 +6,9 @@ from .io import lock, read_json, write_json
 from .registry import register, repository_id, checkpoint_path, upload_artifact, verify_local, DEFAULT_BASE_REPO, DEFAULT_SYNTHETIC_REPO
 
 
-def discover(output_root, registry):
-    folders = {p.parent.resolve() for p in Path(output_root).glob('runs/*/training.json')}
+def discover(output_root, registry, base_output_root=Path('outputs_base_lora')):
+    roots = {Path(output_root).resolve(), Path(base_output_root).resolve()}
+    folders = {p.parent.resolve() for root in roots for p in root.glob('runs/*/training.json')}
     if Path(registry).exists():
         for entry in read_json(registry)['adapters'].values():
             if entry.get('local_path'):
@@ -28,7 +29,10 @@ def discover(output_root, registry):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--output-root', type=Path, default=Path('outputs'))
+    p.add_argument('--output-root', type=Path, default=Path('outputs'),
+                   help='Synthetic continuation output root (also searched for legacy mixed runs)')
+    p.add_argument('--base-output-root', type=Path, default=Path('outputs_base_lora'),
+                   help='Base LoRA and reference evaluation output root')
     p.add_argument('--registry', type=Path, default=Path('configs/base_lora_registry.json'))
     p.add_argument('--hf-namespace', required=True, help='HF username or organization')
     p.add_argument('--hf-repo', default=DEFAULT_BASE_REPO, help='Shared base LoRA repository name')
@@ -46,7 +50,7 @@ def main(argv=None):
                    'seed': 0, 'id': 'a'*64}, args.hf_namespace, args.hf_repo)
     repository_id({'synthetic_id': 'synthetic'}, args.hf_namespace, args.hf_synthetic_repo)
     selected = []
-    for key, (folder, state) in discover(args.output_root, args.registry).items():
+    for key, (folder, state) in discover(args.output_root, args.registry, args.base_output_root).items():
         job = state['job']
         kind = 'synthetic' if job.get('synthetic_id') else 'base'
         if args.kind != 'all' and args.kind != kind:
@@ -77,7 +81,7 @@ def main(argv=None):
         return
     for folder, state, kind in selected:
         job = state['job']
-        with lock(args.output_root / '.locks' / f"{job['id']}.lock"):
+        with lock(folder.parent.parent / '.locks' / f"{job['id']}.lock"):
             if verify_local(folder, job) != state:
                 raise ValueError('Training metadata changed after upload planning')
             if kind == 'base':
@@ -85,7 +89,8 @@ def main(argv=None):
             uploaded = upload_artifact(folder, job, args.hf_namespace, args.private,
                                        args.hf_repo if kind == 'base' else args.hf_synthetic_repo)
             # Persist each success immediately so interrupted batches retain commit IDs.
-            catalog = args.output_root / 'hf_uploads.json'
+            catalog_root = args.base_output_root if kind == 'base' else args.output_root
+            catalog = catalog_root / 'hf_uploads.json'
             with lock(catalog.with_suffix('.lock')):
                 data = read_json(catalog) if catalog.exists() else {'schema': 1, 'adapters': {}}
                 data['adapters'].setdefault(job['id'], {})[uploaded['repo_id']] = {
@@ -96,7 +101,7 @@ def main(argv=None):
                     data = read_json(args.registry)
                     data['adapters'][job['id']].update(uploaded)
                     write_json(args.registry, data)
-    print(f'Uploaded {len(selected)} checkpoint(s). Commit IDs: {args.output_root / "hf_uploads.json"}')
+    print(f'Uploaded {len(selected)} checkpoint(s). Commit IDs are stored in the corresponding output root/hf_uploads.json.')
 
 
 if __name__ == '__main__':

@@ -95,11 +95,12 @@ def test_dry_run_filters_and_no_side_effects(tmp_path, capsys, monkeypatch):
 
 def test_upload_all_records_immutable_destinations(tmp_path, monkeypatch):
     output, registry = tmp_path / 'outputs', tmp_path / 'registry.json'
-    base, _ = artifact(output)
+    base, _ = artifact(tmp_path / 'outputs_base_lora')
     synthetic, _ = artifact(output, synthetic=True)
     calls = fake_hub(monkeypatch)
     main(['--output-root', str(output), '--registry', str(registry),
-          '--hf-namespace', 'my-account', '--kind', 'all', '--private'])
+          '--hf-namespace', 'my-account', '--kind', 'all', '--private',
+          '--base-output-root', str(tmp_path / 'outputs_base_lora')])
     uploads = [kw for name, kw in calls if name == 'upload']
     assert len(uploads) == 2
     assert all(kw['allow_patterns'] == ['adapter/*', 'training.json'] for kw in uploads)
@@ -110,8 +111,10 @@ def test_upload_all_records_immutable_destinations(tmp_path, monkeypatch):
     assert entries[base['id']]['checkpoint_path'] == checkpoint_path(base)
     assert synthetic['id'] not in entries
     catalog = read_json(output / 'hf_uploads.json')['adapters']
-    assert set(catalog) == {base['id'], synthetic['id']}
-    assert all(next(iter(entry.values()))['subfolder'].endswith('/adapter') for entry in catalog.values())
+    base_catalog = read_json(tmp_path / 'outputs_base_lora/hf_uploads.json')['adapters']
+    assert set(catalog) == {synthetic['id']}
+    assert set(base_catalog) == {base['id']}
+    assert all(next(iter(entry.values()))['subfolder'].endswith('/adapter') for entry in {**catalog, **base_catalog}.values())
 
 
 def test_corruption_aborts_before_upload(tmp_path, monkeypatch):

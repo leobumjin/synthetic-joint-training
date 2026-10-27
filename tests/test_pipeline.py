@@ -181,18 +181,33 @@ def test_orchestrator_continuation_and_reporting(prepared, monkeypatch, capsys):
 
     monkeypatch.setattr('synthetic_joint_training.cli.spawn', worker)
     common = ['--models', 'test/model', '--revision', SHA, '--seeds', '0', '--data-root', str(root),
-              '--output-root', str(output), '--registry', str(registry)]
+              '--output-root', str(output), '--base-output-root', str(output.parent / 'outputs_base_lora'),
+              '--registry', str(registry)]
     main(['base', *common])
     captured.clear()
     main(['synthetic', *common, '--synthetic-learning-rate', '1e-5'])
     training = [(j, parent) for action, j, parent in captured if action == 'train']
     assert len(training) == 8
+    base_output = output.parent / 'outputs_base_lora'
+    assert len(list(base_output.glob('runs/*/training.json'))) == 6
+    assert len(list(output.glob('runs/*/training.json'))) == 8
+    assert all(read_json(path)['job']['synthetic_id'] is None for path in base_output.glob('runs/*/training.json'))
+    assert all(read_json(path)['job']['synthetic_id'] for path in output.glob('runs/*/training.json'))
     assert all(parent and '/runs/' in parent for _, parent in training)
     assert all(j['recipe']['learning_rate'] == 1e-5 and j['base_recipe']['learning_rate'] == 2e-5 for j, _ in training)
     assert len({parent for j, parent in training if j['mode'] == 'addition'}) == 2
-    results_main(['--output-root', str(output), '--bootstrap-samples', '20'])
+    results_main(['--output-root', str(output), '--base-output-root', str(output.parent / 'outputs_base_lora'),
+                  '--bootstrap-samples', '20'])
     text = capsys.readouterr().out
     assert '+25.00' in text and 'Δ B100' in text and 'CI[' in text
+    assert 'complete: 14' in text
+    # A copied legacy base tree must not double-count seed results or progress.
+    import shutil
+    shutil.copytree(base_output / 'runs', output / 'runs', dirs_exist_ok=True)
+    results_main(['--output-root', str(output), '--base-output-root', str(base_output)])
+    copied = capsys.readouterr().out
+    assert 'complete: 14' in copied
+    assert 'completed evaluation reports: 15' in copied
 
 
 def test_replacement_rounding_exact_total():

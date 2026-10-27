@@ -70,6 +70,8 @@ Keep code, shell defaults, tests, and README descriptions consistent when changi
 - Derive run identities from content and configuration, not machine-specific absolute paths. Keep model and published adapter revisions pinned to immutable commit SHAs during execution.
 - Verify dataset and adapter integrity before use. Do not fabricate registry entries, completion markers, training results, or publication revisions.
 - Preserve immutable artifacts and use atomic metadata writes and locks where appropriate.
+- Store base LoRA training artifacts and reference evaluations in `outputs_base_lora/`; store synthetic continuations and repeat controls in `outputs/`. Both roots must be gitignored.
+- Keep result discovery and upload discovery aware of both roots, preserve cross-root paired comparisons, and deduplicate identical copied reports. Output path changes must not alter run identities.
 - Base adapters share `<namespace>/synthetic-joint-training-base-loras`; synthetic continuations use a separate configurable shared repository.
 - Store checkpoints under model/benchmark/seed/condition/run-hash subfolders. Different recipes, including ranks, must remain distinguishable.
 - Publish only selected adapter/tokenizer files and training metadata. Exclude original datasets, full model weights, optimizer checkpoints, and evaluation completions.

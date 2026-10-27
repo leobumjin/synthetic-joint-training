@@ -100,6 +100,7 @@ These fixtures validate the workflow, not benchmark performance. [Verification d
 - [Installation](#installation)
 - [Configuration and synthetic input](#configuration-and-synthetic-input)
 - [Benchmark splitting](#benchmark-splitting)
+- [Local output layout](#local-output-layout)
 - [Base LoRA training](#base-lora-training)
 - [Hugging Face storage and incremental upload](#hugging-face-storage-and-incremental-upload)
 - [Synthetic continuation training](#synthetic-continuation-training)
@@ -291,6 +292,38 @@ Exact synthetic prompt overlaps with benchmark heldout prompts are rejected. Thi
 
 Preparing synthetic datasets later with the same benchmark settings preserves the benchmark identity. Named synthetic pools remain available when another pool is added. The legacy single-pool `--synthetic-file` option is also supported.
 
+## Local output layout
+
+Base artifacts and synthetic continuations use separate roots. Both directories are excluded from Git.
+
+```text
+outputs_base_lora/                 # Reusable benchmark checkpoints and reference scores
+├── plans/
+├── runs/<run-id>/
+│   ├── job.json
+│   ├── training.json
+│   ├── adapter/
+│   ├── checkpoints/
+│   └── evaluations/
+└── hf_uploads.json                # Written by the upload-only script
+
+outputs/                           # Synthetic continuations and optional repeat controls
+├── plans/
+├── runs/<run-id>/
+│   ├── job.json
+│   ├── training.json
+│   ├── adapter/
+│   ├── checkpoints/
+│   └── evaluations/
+└── hf_uploads.json                # Written by the upload-only script
+```
+
+The base root also holds unadapted-model evaluations and parent/B100 reference evaluations requested by synthetic runs. Evaluation-only runs need not have training files or adapters in their local run folders.
+
+Override paths through `BASE_OUTPUT_ROOT` / `OUTPUT_ROOT`, or `--base-output-root` / `--output-root`. `run_base_lora.sh` writes to the base root; `run.sh` writes continuations to the synthetic root and references to the base root. Run identities do not depend on these paths.
+
+`print_results.sh` searches both roots and pairs matching references across them. The uploader also searches both roots and registered local adapter paths. Identical copied reports are counted once. Existing mixed-root results remain readable and uploadable; files are not automatically moved. To resume base training in an older location, set `BASE_OUTPUT_ROOT` to that location.
+
 ## Base LoRA training
 
 Select models, benchmarks, ranks, and seeds in `env.sh`. The base recipe is the compatibility contract for subsequent synthetic runs.
@@ -361,7 +394,7 @@ Only the selected checkpoint folder is uploaded. Unchanged registered runs are s
 
 The shared `registry.json` records each checkpoint's `repo_id`, `checkpoint_path`, adapter `subfolder`, immutable weight `revision`, file hashes, and recipe. Registry merges preserve existing entries and retry concurrent update conflicts. The weight revision remains pinned even after later uploads. If an upload is interrupted between writing weights and updating the registry, rerun it to finish registration.
 
-Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. Successful uploads are also recorded in `outputs/hf_uploads.json`; base uploads update the local base registry. Local adapters live at `outputs/runs/<run-id>/adapter/`.
+Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. The upload-only script records base uploads in `outputs_base_lora/hf_uploads.json` and synthetic uploads in `outputs/hf_uploads.json`. Base uploads also update the local base registry. Local base adapters live at `outputs_base_lora/runs/<run-id>/adapter/`; continuation adapters live at `outputs/runs/<run-id>/adapter/`.
 
 ### Download only the needed checkpoints
 
@@ -409,7 +442,7 @@ bash shells/print_results.sh --models Qwen/Qwen3-4B-Instruct-2507 \
   --benchmarks gsm8k --bootstrap-samples 1000
 ```
 
-Results are discovered from saved manifests without requiring the original data paths. Different model revisions, benchmark identities, evaluation settings, or runtime/parser versions stay in separate cohorts. Different training recipes and synthetic datasets stay in separate rows.
+Results are discovered from saved manifests in both `outputs_base_lora/` and `outputs/`, without requiring the original data paths. Different model revisions, benchmark identities, evaluation settings, or runtime/parser versions stay in separate cohorts. Different training recipes and synthetic datasets stay in separate rows.
 
 Reports include:
 

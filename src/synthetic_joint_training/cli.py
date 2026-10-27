@@ -26,7 +26,10 @@ def parser():
     p.add_argument('--mode', choices=('replacement', 'addition', 'all'), default='all')
     p.add_argument('--stage', choices=('train', 'eval', 'all'), default='all')
     p.add_argument('--data-root', type=Path, default=Path('data'))
-    p.add_argument('--output-root', type=Path, default=Path('outputs'))
+    p.add_argument('--output-root', type=Path, default=Path('outputs'),
+                   help='Synthetic continuation output root (also searched for legacy mixed runs)')
+    p.add_argument('--base-output-root', type=Path, default=Path('outputs_base_lora'),
+                   help='Base LoRA and reference evaluation output root')
     p.add_argument('--registry', type=Path, default=Path('configs/base_lora_registry.json'))
     p.add_argument('--epochs', type=float, default=1.0, help='Benchmark checkpoint recipe; must match registry')
     p.add_argument('--synthetic-epochs', type=float, default=1.0)
@@ -122,6 +125,7 @@ def main(argv=None):
 
 
 def execute(args, p, bundles):
+    active_root = args.base_output_root if args.command == 'base' else args.output_root
     if args.stage in ('eval', 'all'):
         for name, bundle in bundles.items():
             if not any(r['split'] == args.eval_split for r in bundle[3]):
@@ -160,9 +164,10 @@ def execute(args, p, bundles):
         if args.dry_run:
             print(json.dumps({'model': model, 'model_revision': args.revision,
                 'revision_note': 'Mutable revisions are resolved at execution time',
+                'output_root': str(active_root), 'base_output_root': str(args.base_output_root),
                 'command': args.command, 'synthetic': args.synthetic_selection, 'stage': args.stage, 'jobs': jobs}, indent=2))
             continue
-        args.output_root.mkdir(parents=True, exist_ok=True)
+        active_root.mkdir(parents=True, exist_ok=True)
         if args.command == 'synthetic':
             # Resolve every required parent before any expensive training starts.
             parent_ids = {j['parent_id'] for j in jobs}
@@ -172,7 +177,7 @@ def execute(args, p, bundles):
             parents = {}
         if args.stage in ('train', 'all'):
             plan_identity = {'command': args.command, 'jobs': jobs}
-            write_json(args.output_root / 'plans' / f'{digest(plan_identity)}.json', plan_identity)
+            write_json(active_root / 'plans' / f'{digest(plan_identity)}.json', plan_identity)
         loaded_parents = {}
         def load_parent(key):
             if key not in loaded_parents:
@@ -180,8 +185,8 @@ def execute(args, p, bundles):
             return loaded_parents[key]
         payload_args = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
         for job in jobs:
-            folder = args.output_root / 'runs' / job['id']
-            with lock(args.output_root / '.locks' / f"{job['id']}.lock"):
+            folder = active_root / 'runs' / job['id']
+            with lock(active_root / '.locks' / f"{job['id']}.lock"):
                 print(f"{args.command}: {job['benchmark']} B{job['benchmark_percent']} "
                       f"S{job['synthetic_percent']} rank={job['recipe']['lora_rank']} "
                       f"alpha={job['recipe']['lora_alpha']} seed={job['seed']} id={job['id'][:12]}", flush=True)
@@ -212,8 +217,8 @@ def execute(args, p, bundles):
             # Evaluate parent checkpoints and unadapted model as well, so deltas are available.
             relevant = [] if args.command == 'base' else [bases[k] for k in sorted(parents)]
             for base in relevant:
-                folder = args.output_root / 'runs' / base['id']
-                with lock(args.output_root / '.locks' / f"{base['id']}.lock"):
+                folder = args.base_output_root / 'runs' / base['id']
+                with lock(args.base_output_root / '.locks' / f"{base['id']}.lock"):
                     parent = load_parent(base['id'])
                     payload = {'job': base, 'args': payload_args, 'output': str(folder),
                                'adapter': str(parent / 'adapter')}
@@ -223,8 +228,8 @@ def execute(args, p, bundles):
                 original = {**exemplar, 'benchmark_percent': 0, 'synthetic_percent': 0,
                             'seed': None, 'kind': 'unadapted'}
                 original['id'] = digest({k: v for k, v in original.items() if k != 'id'})
-                folder = args.output_root / 'runs' / original['id']
-                with lock(args.output_root / '.locks' / f"{original['id']}.lock"):
+                folder = args.base_output_root / 'runs' / original['id']
+                with lock(args.base_output_root / '.locks' / f"{original['id']}.lock"):
                     spawn('eval', {'job': original, 'args': payload_args, 'output': str(folder),
                                    'adapter': None}, args.inference_python, folder)
         # Restore requested revision so each model resolves its own commit.

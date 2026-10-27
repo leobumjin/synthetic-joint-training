@@ -70,3 +70,12 @@ def test_invalid_rank_configuration(flags):
     p = parser()
     with pytest.raises(SystemExit):
         validate(p, p.parse_args(['base', *flags]))
+
+
+def test_output_defaults_are_separate_and_not_in_run_identity(bundles):
+    p = parser()
+    original = p.parse_args(['base'])
+    moved = p.parse_args(['base', '--output-root', '/tmp/synthetic', '--base-output-root', '/tmp/base'])
+    assert str(original.output_root) == 'outputs'
+    assert str(original.base_output_root) == 'outputs_base_lora'
+    assert build_plan(original, bundles) == build_plan(moved, bundles)

@@ -222,4 +222,5 @@ __marimo__/
 # Local experiment artifacts
 /data/
 /outputs/
+/outputs_base_lora/
 /configs/*.lock

@@ -6,7 +6,7 @@ export PYTHONPATH="${PROJECT_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 RUN_ARGS=(
   --models "${MODELS[@]}" --benchmarks "${BENCHMARKS[@]}" --seeds "${TRAIN_SEEDS[@]}"
-  --revision "$MODEL_REVISION" --data-root "$DATA_ROOT" --output-root "$OUTPUT_ROOT"
+  --revision "$MODEL_REVISION" --data-root "$DATA_ROOT" --output-root "$OUTPUT_ROOT" --base-output-root "$BASE_OUTPUT_ROOT"
   --registry "$BASE_LORA_REGISTRY" --hf-repo "$HF_REPO" --train-python "$TRAIN_PYTHON" --inference-python "$INFERENCE_PYTHON"
   --epochs "$EPOCHS" --synthetic-epochs "$SYNTHETIC_EPOCHS" --learning-rate "$LEARNING_RATE"
   --batch-size "$BATCH_SIZE" --gradient-accumulation "$GRADIENT_ACCUMULATION" --max-length "$MAX_LENGTH"

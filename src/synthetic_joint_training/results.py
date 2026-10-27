@@ -55,7 +55,10 @@ def print_table(headers, rows):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--output-root', type=Path, default=Path('outputs'))
+    p.add_argument('--output-root', type=Path, default=Path('outputs'),
+                   help='Synthetic continuation output root (also searched for legacy mixed runs)')
+    p.add_argument('--base-output-root', type=Path, default=Path('outputs_base_lora'),
+                   help='Base LoRA and reference evaluation output root')
     p.add_argument('--models', nargs='+')
     p.add_argument('--benchmarks', nargs='+')
     p.add_argument('--bootstrap-samples', type=int, default=0,
@@ -64,18 +67,26 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.bootstrap_samples < 0:
         p.error('bootstrap-samples must be nonnegative')
-    reports = []
-    for path in sorted(args.output_root.glob('runs/*/evaluations/*/report.json')):
+    roots = list(dict.fromkeys([args.base_output_root.resolve(), args.output_root.resolve()]))
+    reports, seen = [], {}
+    paths = {path for root in roots for path in root.glob('runs/*/evaluations/*/report.json')}
+    for path in sorted(paths):
         report = read_json(path)
         job = report['job']
         if args.models and job['model'] not in args.models:
             continue
         if args.benchmarks and job['benchmark'] not in args.benchmarks:
             continue
+        key = (job['id'], digest(report['identity']))
+        if key in seen:
+            if seen[key] != report:
+                raise ValueError('Conflicting duplicate evaluation reports across output roots')
+            continue
+        seen[key] = dict(report)
         report['_folder'] = path.parent
         reports.append(report)
     if not reports:
-        print(f'No completed evaluations in {args.output_root.resolve()}')
+        print('No completed evaluations in ' + ', '.join(str(root) for root in roots))
     # Never combine evaluation protocols, model revisions, or benchmark manifests.
     cohorts = defaultdict(list)
     for report in reports:
@@ -125,10 +136,10 @@ def main(argv=None):
             print_table(['Condition', 'Rank', 'Alpha', 'Synthetic', 'Recipe', 'Seeds', 'Accuracy', 'Extract fail',
                          'Format fail', 'Length limit', 'Δ parent', 'Δ B100'], table)
     known = {}
-    for path in args.output_root.glob('plans/*.json'):
+    for path in (path for root in roots for path in root.glob('plans/*.json')):
         for job in read_json(path)['jobs']:
             known[job['id']] = job
-    for path in args.output_root.glob('runs/*/job.json'):
+    for path in (path for root in roots for path in root.glob('runs/*/job.json')):
         job = read_json(path)
         known[job['id']] = job
     known = {key: job for key, job in known.items() if
@@ -136,8 +147,9 @@ def main(argv=None):
              (not args.benchmarks or job['benchmark'] in args.benchmarks)}
     states = []
     for key in known:
-        path = args.output_root / 'runs' / key / 'training.json'
-        states.append(read_json(path).get('status') if path.exists() else 'pending')
+        paths = [root / 'runs' / key / 'training.json' for root in roots]
+        saved = [read_json(path).get('status') for path in paths if path.exists()]
+        states.append('complete' if 'complete' in saved else 'running' if 'running' in saved else 'pending')
     print(f'\nPlanned/saved training jobs: {len(known)} | complete: {states.count("complete")} | '
           f'partial: {states.count("running")} | pending: {states.count("pending")} | '
           f'completed evaluation reports: {len(reports)}')
