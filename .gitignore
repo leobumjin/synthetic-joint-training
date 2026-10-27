@@ -218,3 +218,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local experiment artifacts
+/data/
+/outputs/
+/configs/*.lock
