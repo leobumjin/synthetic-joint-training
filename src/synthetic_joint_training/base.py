@@ -3,12 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .training_data import bundle_for_job, select_training_rows
-from .io import lock, read_json, write_json
-from .registry import register, resolve, reusable_base, verify_local
-
-
-def read_only_snapshot(registry, job):
-    return bool(read_json(Path(registry))['adapters'][job['id']].get('repo_id'))
+from .io import lock, write_json
+from .registry import register, resolve, verify_local
 
 
 def description(job):
@@ -27,33 +23,12 @@ def train_bases(payload):
     jobs = payload['jobs']
     is_joint = bool(jobs[0]['synthetic_id'])
     root = Path(args.output_root if is_joint else args.base_output_root)
-    # Check the entire model grid before loading a GPU model. A registry may
-    # point to an older output root, including after a storage-layout change.
-    registered = {} if is_joint else {
-        job['id']: reusable_base(args.registry, job, root / 'runs' / job['id'])
-        for job in jobs
-    }
     session, bundles = TrainingSession(), {}
     with tqdm(jobs, desc='Joint LoRA training' if is_joint else 'Base LoRA training', position=0, unit='LoRA') as progress:
         for job in progress:
             progress.set_description(('Joint training | ' if is_joint else 'Base training | ') + description(job))
             folder = root / 'runs' / job['id']
             with lock(root / '.locks' / f"{job['id']}.lock"):
-                existing = registered.get(job['id'])
-                if existing is not None:
-                    # The registered artifact wins over an unregistered retry.
-                    # Keep any different retry weights untouched for inspection.
-                    source_lock = existing.parent.parent / '.locks' / f"{job['id']}.lock"
-                    if read_only_snapshot(args.registry, job):
-                        pass
-                    elif existing.resolve() == folder.resolve():
-                        cleanup_checkpoints(job, existing)
-                    else:
-                        with lock(source_lock):
-                            verify_local(existing, job)
-                            cleanup_checkpoints(job, existing)
-                    progress.set_postfix(status='registered')
-                    continue
                 write_json(folder / 'job.json', job)
                 cached = completed(job, folder)
                 if not cached:
@@ -65,7 +40,7 @@ def train_bases(payload):
                 if cached:
                     cleanup_checkpoints(job, folder)
                 if not is_joint:
-                    register(args.registry, job, folder)
+                    register(args.registry, job, folder, reconcile=True)
                 progress.set_postfix(status='cached' if cached else 'trained')
 
 

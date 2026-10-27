@@ -34,34 +34,24 @@ def test_cleanup_only_verified_complete_training(tmp_path):
     assert (corrupt / 'checkpoints').exists()
 
 
-def test_registered_base_rebinds_only_identical_relocated_artifact(tmp_path):
-    import shutil
-    from synthetic_joint_training.registry import register, reusable_base
+def test_base_registration_reconciles_stale_index_and_preserves_history(tmp_path):
+    from synthetic_joint_training.registry import register
     from synthetic_joint_training.io import read_json
-    original, job = saved_run(tmp_path / 'old')
+    folder, job = saved_run(tmp_path / 'base')
     registry = tmp_path / 'configs/registry.json'
-    register(registry, job, original)
-    moved = tmp_path / 'new/runs/a'
-    moved.parent.mkdir(parents=True)
-    shutil.move(original, moved)
-    assert reusable_base(registry, job, moved) == moved.resolve()
-    assert read_json(registry)['adapters']['a']['local_path'] == '../new/runs/a'
-    assert reusable_base(registry, {'id': 'unregistered'}, moved) is None
-
-
-def test_registered_missing_weights_fail_before_retraining(tmp_path):
-    import shutil
-    from synthetic_joint_training.registry import register, reusable_base
-    original, job = saved_run(tmp_path / 'old')
-    registry = tmp_path / 'configs/registry.json'
-    register(registry, job, original)
-    shutil.rmtree(original)
-    replacement, _ = saved_run(tmp_path / 'new')
-    (replacement / 'adapter/adapter_model.safetensors').write_bytes(b'new weights')
-    from synthetic_joint_training.io import read_json
-    state = read_json(replacement / 'training.json')
-    state['adapter_sha256'] = adapter_signature(replacement / 'adapter')
-    write_json(replacement / 'training.json', state)
-    with pytest.raises(ValueError, match='Restore the original registered adapter'):
-        reusable_base(registry, job, replacement)
-    assert (replacement / 'checkpoints').exists()
+    register(registry, job, folder)
+    old = read_json(registry)['adapters']['a']
+    old.update(repo_id='fixture/published', revision='a'*40)
+    write_json(registry, {'schema': 1, 'adapters': {'a': old, 'unrelated': {'fixture': True}}})
+    (folder / 'adapter/adapter_model.safetensors').write_bytes(b'retrained')
+    state = read_json(folder / 'training.json')
+    state['adapter_sha256'] = adapter_signature(folder / 'adapter')
+    write_json(folder / 'training.json', state)
+    with pytest.raises(ValueError, match='different adapter weights'):
+        register(registry, job, folder)
+    register(registry, job, folder, reconcile=True)
+    current = read_json(registry)['adapters']
+    assert current['a']['adapter_sha256'] == state['adapter_sha256']
+    assert 'repo_id' not in current['a']
+    assert current['unrelated'] == {'fixture': True}
+    assert list(read_json(registry.with_name('registry.history.json'))['entries'].values()) == [old]

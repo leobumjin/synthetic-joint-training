@@ -216,6 +216,13 @@ def test_base_worker_keeps_one_training_session_and_skips_completed_jobs(tmp_pat
     assert (checkpoints.parent / 'adapter/adapter_model.safetensors').exists()
     assert base.weight == 17
 
+    # A stale index cannot prevent rebuilding a missing run.
+    import shutil
+    shutil.rmtree(checkpoints.parent)
+    train_bases(payload)
+    assert events.count('load_model') == 2
+    assert (checkpoints.parent / 'adapter/adapter_model.safetensors').exists()
+
 
 def test_stale_launcher_cannot_train_with_changed_protocol(tmp_path):
     stale = {**job(), 'protocol': 'sequential-direct-json-v1'}
@@ -251,7 +258,7 @@ def test_joint_worker_uses_fresh_adapters_and_one_original_backbone(tmp_path, mo
         assert state['job']['initialization'] == 'original_model'
 
 
-def test_base_worker_reuses_registered_old_root_after_conflicting_retry(tmp_path, monkeypatch):
+def test_base_worker_uses_current_files_and_reconciles_old_registry(tmp_path, monkeypatch):
     import shutil
     from synthetic_joint_training.base import train_bases
     from synthetic_joint_training.registry import register
@@ -271,10 +278,12 @@ def test_base_worker_reuses_registered_old_root_after_conflicting_retry(tmp_path
     state['adapter_sha256'] = adapter_signature(retry / 'adapter')
     write_json(retry / 'training.json', state)
     write_json(original / 'checkpoints/checkpoint-1/optimizer.pt', {})
+    write_json(retry / 'checkpoints/checkpoint-1/optimizer.pt', {})
     args = parser().parse_args(['base', '--base-output-root', str(root), '--registry', str(registry)])
     before = list(events)
     train_bases({'jobs': [current], 'args': vars(args)})
     assert events == before  # No tokenizer, backbone, optimizer, or training.
-    assert not (original / 'checkpoints').exists()
+    assert (original / 'checkpoints').exists()
+    assert not (retry / 'checkpoints').exists()
     assert (retry / 'adapter/adapter_model.safetensors').read_bytes() == b'different retry'
-    assert read_json(registry)['adapters'][current['id']]['adapter_sha256'] != state['adapter_sha256']
+    assert read_json(registry)['adapters'][current['id']]['adapter_sha256'] == state['adapter_sha256']

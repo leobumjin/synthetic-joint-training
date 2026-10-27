@@ -8,46 +8,26 @@ from .io import read_json, write_json, lock
 from .train import adapter_signature
 
 
-def register(registry, job, folder):
+def register(registry, job, folder, reconcile=False):
     registry = Path(registry)
     with lock(registry.with_suffix('.lock')):
         data = read_json(registry) if registry.exists() else {'schema': 1, 'adapters': {}}
-        state = read_json(Path(folder) / 'training.json')
-        if state['status'] != 'complete':
-            raise ValueError('Cannot register incomplete training')
+        state = verify_local(folder, job)
         existing = data['adapters'].get(job['id'], {})
-        if existing and existing['adapter_sha256'] != state['adapter_sha256']:
-            raise ValueError('Registry already binds this job to different adapter weights')
+        if existing and (existing['adapter_sha256'] != state['adapter_sha256'] or existing['job'] != job):
+            if not reconcile:
+                raise ValueError('Registry already binds this job to different adapter weights')
+            # Base runs treat verified files as authoritative. Keep stale
+            # bindings for audit, and detach old remote publication metadata.
+            from .io import digest
+            backup = registry.with_name(registry.stem + '.history.json')
+            history = read_json(backup) if backup.exists() else {'schema': 1, 'entries': {}}
+            history['entries'][digest(existing)] = existing
+            write_json(backup, history)
+            existing = {}
         data['adapters'][job['id']] = {**existing, 'job': job, 'adapter_sha256': state['adapter_sha256'],
             'local_path': os.path.relpath(Path(folder).resolve(), registry.parent.resolve())}
         write_json(registry, data)
-
-
-def reusable_base(registry, job, candidate):
-    """Find the registered immutable artifact before considering new training."""
-    registry, candidate = Path(registry), Path(candidate)
-    if not registry.exists():
-        return None
-    data = read_json(registry)
-    if job['id'] not in data['adapters']:
-        return None
-    entry = registry_entry(registry, job)
-    try:
-        return resolve(registry, job)
-    except FileNotFoundError as exc:
-        # A moved output tree may leave a stale local path. Rebind only when
-        # the relocated final adapter has exactly the registered signature.
-        if not entry.get('repo_id') and (candidate / 'training.json').exists():
-            state = verify_local(candidate, job)
-            if state['adapter_sha256'] == entry['adapter_sha256']:
-                register(registry, job, candidate)
-                return candidate.resolve()
-        raise ValueError(
-            f"Registered base LoRA {job['id']} is unavailable. Registry: {registry}; "
-            f"recorded local path: {entry.get('local_path')}; current output: {candidate}. "
-            'Restore the original registered adapter or correct its path. '
-            'Refusing to retrain or replace this run with different weights.'
-        ) from exc
 
 
 def registry_entry(registry, job):
