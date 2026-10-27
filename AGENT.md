@@ -80,7 +80,7 @@ Keep code, shell defaults, tests, and README descriptions consistent when changi
 - Keep recovery checkpoints for incomplete runs. Remove them only after final adapter completion and hash verification; preserve adapters, tokenizers, training metadata, and evaluation artifacts.
 - Keep result discovery and upload discovery aware of both roots, preserve cross-root paired comparisons, and deduplicate identical copied reports. Output path changes must not alter run identities.
 - Base adapters share `<namespace>/synthetic-joint-training-base-loras`; joint LoRAs use a separate configurable shared repository.
-- Store checkpoints under model/benchmark/seed/condition/run-hash subfolders. Different recipes, including ranks, must remain distinguishable.
+- Local runs use `runs/<benchmark>/<model>/<setting>__<short-id>/` through `paths.py`. Migrate hash-only legacy folders under the same run lock when matching jobs execute, without changing identities; recursively discover both layouts for results and uploads. HF checkpoints retain model/benchmark/seed/condition/run-hash subfolders. Different recipes, including ranks, must remain distinguishable.
 - Publish only selected adapter/tokenizer files and training metadata. Exclude original datasets, full model weights, optimizer checkpoints, and evaluation completions.
 - Upload new checkpoint folders incrementally; skip identical registered artifacts and reject conflicting content for an existing run ID.
 - Merge the shared remote registry without dropping unrelated entries. Retain optimistic concurrency checks and retries.

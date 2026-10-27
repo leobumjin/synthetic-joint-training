@@ -9,6 +9,7 @@ from synthetic_joint_training.benchmarks import normalize, parse_completion
 from synthetic_joint_training.data import freeze, load_bundle, count, normalize_synthetic
 from synthetic_joint_training.io import read_json, read_rows, write_json, write_rows
 from synthetic_joint_training.cli import parser, main
+from synthetic_joint_training.paths import run_folder
 from synthetic_joint_training.plan import build_plan
 from synthetic_joint_training.registry import register, resolve
 from synthetic_joint_training.train import encode_example, adapter_signature
@@ -167,7 +168,7 @@ def test_orchestrator_continuation_and_reporting(prepared, monkeypatch, capsys):
             selected = payload['jobs'] if action.startswith('train-') else payload.get('originals', []) + payload.get('references', []) + payload['jobs']
             for entry in selected:
                 phase_root = Path(payload['args']['output_root' if entry['synthetic_id'] else 'base_output_root'])
-                destination = phase_root / 'runs' / entry['id']
+                destination = run_folder(phase_root, entry)
                 worker('train' if action.startswith('train-') else 'eval', {'job': entry}, interpreter, destination)
                 if action == 'train-base':
                     register(Path(payload['args']['registry']), entry, destination)
@@ -201,10 +202,10 @@ def test_orchestrator_continuation_and_reporting(prepared, monkeypatch, capsys):
     training = [(j, parent) for action, j, parent in captured if action == 'train']
     assert len(training) == 8
     base_output = output.parent / 'outputs_base_lora'
-    assert len(list(base_output.glob('runs/*/training.json'))) == 2
-    assert len(list(output.glob('runs/*/training.json'))) == 8
-    assert all(read_json(path)['job']['synthetic_id'] is None for path in base_output.glob('runs/*/training.json'))
-    assert all(read_json(path)['job']['synthetic_id'] for path in output.glob('runs/*/training.json'))
+    assert len(list(base_output.glob('runs/**/training.json'))) == 2
+    assert len(list(output.glob('runs/**/training.json'))) == 8
+    assert all(read_json(path)['job']['synthetic_id'] is None for path in base_output.glob('runs/**/training.json'))
+    assert all(read_json(path)['job']['synthetic_id'] for path in output.glob('runs/**/training.json'))
     assert all(parent is None for _, parent in training)
     assert all(j['initialization'] == 'original_model' for j, _ in training)
     assert all(j['recipe']['learning_rate'] == 1e-5 and j['base_recipe']['learning_rate'] == 2e-5 for j, _ in training)

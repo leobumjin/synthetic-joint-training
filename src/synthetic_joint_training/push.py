@@ -3,12 +3,13 @@ import argparse
 from pathlib import Path
 
 from .io import lock, read_json, write_json
+from .paths import artifact_root
 from .registry import register, repository_id, checkpoint_path, upload_artifact, verify_local, DEFAULT_BASE_REPO, DEFAULT_SYNTHETIC_REPO
 
 
 def discover(output_root, registry, base_output_root=Path('outputs_base_lora')):
     roots = {Path(output_root).resolve(), Path(base_output_root).resolve()}
-    folders = {p.parent.resolve() for root in roots for p in root.glob('runs/*/training.json')}
+    folders = {p.parent.resolve() for root in roots for p in (root / 'runs').rglob('training.json')}
     if Path(registry).exists():
         for entry in read_json(registry)['adapters'].values():
             if entry.get('local_path'):
@@ -81,7 +82,7 @@ def main(argv=None):
         return
     for folder, state, kind in selected:
         job = state['job']
-        with lock(folder.parent.parent / '.locks' / f"{job['id']}.lock"):
+        with lock(artifact_root(folder) / '.locks' / f"{job['id']}.lock"):
             if verify_local(folder, job) != state:
                 raise ValueError('Training metadata changed after upload planning')
             if kind == 'base':

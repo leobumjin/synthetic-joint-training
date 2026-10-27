@@ -306,7 +306,7 @@ Base artifacts and joint LoRAs use separate roots. Both directories are excluded
 ```text
 outputs_base_lora/                 # Reusable benchmark checkpoints and reference scores
 ├── plans/
-├── runs/<run-id>/
+├── runs/<benchmark>/<model>/<setting>__<short-id>/
 │   ├── job.json
 │   ├── training.json
 │   ├── adapter/
@@ -316,7 +316,7 @@ outputs_base_lora/                 # Reusable benchmark checkpoints and referenc
 
 outputs/                           # Joint LoRAs and optional repeat controls
 ├── plans/
-├── runs/<run-id>/
+├── runs/<benchmark>/<model>/<setting>__<short-id>/
 │   ├── job.json
 │   ├── training.json
 │   ├── adapter/
@@ -325,11 +325,24 @@ outputs/                           # Joint LoRAs and optional repeat controls
 └── hf_uploads.json                # Written by the upload-only script
 ```
 
+For example, a base LoRA is stored at:
+
+```text
+outputs_base_lora/runs/gsm8k/google_gemma-3-4b-it/
+└── B100_r16_a32_seed0_ep5_lr2e-05__<short-id>/
+    ├── adapter/
+    ├── training.json
+    ├── job.json
+    └── evaluations/
+```
+
+Joint settings additionally include the mixture and synthetic dataset name, such as `B90+S10_edit_r16_a32_seed0_ep5_lr2e-05__<short-id>`. The short ID distinguishes all remaining recipe, data, model-revision, and protocol differences; full identities stay in the JSON metadata. Model namespaces are retained in the model folder name. This local layout does not change existing HF checkpoint paths.
+
 The base root also holds unadapted-model evaluations and B100 reference evaluations requested by synthetic runs. Evaluation-only runs need not have training files or adapters in their local run folders.
 
 Override paths through `BASE_OUTPUT_ROOT` / `OUTPUT_ROOT`, or `--base-output-root` / `--output-root`. `run_base_lora.sh` writes to the base root; `run.sh` writes joint runs to the synthetic root and references to the base root. Run identities do not depend on these paths.
 
-`print_results.sh` searches both roots and pairs matching references across them. The uploader also searches both roots and registered local adapter paths. Identical copied reports are counted once. Existing mixed-root results remain readable and uploadable; files are not automatically moved. To resume base training in an older location, set `BASE_OUTPUT_ROOT` to that location.
+`print_results.sh` searches both roots and pairs matching references across them. The uploader also searches both roots and registered local adapter paths. Identical copied reports are counted once. Existing mixed-root results remain readable and uploadable; Hash-only legacy folders in the active output root are moved into the readable layout when their matching jobs run again; their adapters and evaluations are reused. To resume base training in an older location, set `BASE_OUTPUT_ROOT` to that location.
 
 ## Storage cleanup and server migration
 
@@ -339,7 +352,7 @@ Run the normal base command again with the same model, data, and recipe settings
 bash shells/run_base_lora.sh
 ```
 
-The current `runs/<run-id>/` files determine whether training is needed. A complete final adapter with matching metadata and hash is reused without loading the training model. If the run is absent, it is trained normally even if the registry still has an old entry. Invalid or corrupted completed files fail validation instead of being silently overwritten; interrupted runs keep their recovery state and use `--resume`.
+The current `runs/<benchmark>/<model>/<setting>__<short-id>/` files determine whether training is needed. A complete final adapter with matching metadata and hash is reused without loading the training model. If the run is absent, it is trained normally even if the registry still has an old entry. Invalid or corrupted completed files fail validation instead of being silently overwritten; interrupted runs keep their recovery state and use `--resume`.
 
 The registry is a derived lookup index for evaluation and HF publication, not a prerequisite for base training. After training or reusing local files, the base command refreshes their registry entry. If an old entry points to different weights, it is preserved in `configs/base_lora_registry.history.json` before replacement; stale HF publication links are detached. Remote repositories are not modified. Completed runs remove intermediate `checkpoints/`, including optimizer state, after final adapter verification. Completed evaluation reports are reused when their recorded adapter and evaluation identities match.
 
@@ -415,7 +428,7 @@ Only the selected checkpoint folder is uploaded. Unchanged registered runs are s
 
 The shared `registry.json` records each checkpoint's `repo_id`, `checkpoint_path`, adapter `subfolder`, immutable weight `revision`, file hashes, and recipe. Registry merges preserve existing entries and retry concurrent update conflicts. The weight revision remains pinned even after later uploads. If an upload is interrupted between writing weights and updating the registry, rerun it to finish registration.
 
-Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. The upload-only script records base uploads in `outputs_base_lora/hf_uploads.json` and synthetic uploads in `outputs/hf_uploads.json`. Base uploads also update the local base registry. Local base adapters live at `outputs_base_lora/runs/<run-id>/adapter/`; joint adapters live at `outputs/runs/<run-id>/adapter/`.
+Uploads contain adapter/tokenizer files and `training.json`, including selected example IDs and provenance. Full base-model weights, optimizer checkpoints, original datasets, and evaluation completions are excluded. The upload-only script records base uploads in `outputs_base_lora/hf_uploads.json` and synthetic uploads in `outputs/hf_uploads.json`. Base uploads also update the local base registry. Local base adapters live at `outputs_base_lora/runs/<benchmark>/<model>/<setting>__<short-id>/adapter/`; joint adapters live at `outputs/runs/<benchmark>/<model>/<setting>__<short-id>/adapter/`.
 
 ### Download only the needed checkpoints
 

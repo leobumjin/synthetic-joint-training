@@ -10,6 +10,7 @@ import pytest
 
 from synthetic_joint_training.cli import parser
 from synthetic_joint_training.io import digest, read_json, write_json
+from synthetic_joint_training.paths import run_folder
 from synthetic_joint_training.plan import make_job, recipe
 from synthetic_joint_training.train import TrainingSession, train
 
@@ -207,11 +208,15 @@ def test_base_worker_keeps_one_training_session_and_skips_completed_jobs(tmp_pat
     assert len(read_json(args.registry)['adapters']) == 1
     # Re-running the normal base command cleans legacy recovery checkpoints
     # without loading or retraining the completed adapter.
-    checkpoints = args.base_output_root / 'runs' / jobs[0]['id'] / 'checkpoints'
+    checkpoints = run_folder(args.base_output_root, jobs[0]) / 'checkpoints'
     write_json(checkpoints / 'checkpoint-1/optimizer.pt', {'fixture': True})
+    # An old hash-only folder is relocated and reused on the normal command.
+    legacy = args.base_output_root / 'runs' / jobs[0]['id']
+    checkpoints.parent.rename(legacy)
     before = list(events)
     train_bases(payload)
     assert events == before
+    assert not legacy.exists()
     assert not checkpoints.exists()
     assert (checkpoints.parent / 'adapter/adapter_model.safetensors').exists()
     assert base.weight == 17
@@ -253,7 +258,7 @@ def test_joint_worker_uses_fresh_adapters_and_one_original_backbone(tmp_path, mo
     assert backbone.weight == 17
     assert not args.registry.exists()
     for job in jobs:
-        state = read_json(args.output_root / 'runs' / job['id'] / 'training.json')
+        state = read_json(run_folder(args.output_root, job) / 'training.json')
         assert state['status'] == 'complete'
         assert state['job']['initialization'] == 'original_model'
 
@@ -271,7 +276,7 @@ def test_base_worker_uses_current_files_and_reconciles_old_registry(tmp_path, mo
     registry = tmp_path / 'configs/registry.json'
     register(registry, current, original)
     root = tmp_path / 'new'
-    retry = root / 'runs' / current['id']
+    retry = run_folder(root, current)
     shutil.copytree(original, retry)
     (retry / 'adapter/adapter_model.safetensors').write_bytes(b'different retry')
     state = read_json(retry / 'training.json')

@@ -69,7 +69,7 @@ def main(argv=None):
         p.error('bootstrap-samples must be nonnegative')
     roots = list(dict.fromkeys([args.base_output_root.resolve(), args.output_root.resolve()]))
     reports, seen = [], {}
-    paths = {path for root in roots for path in root.glob('runs/*/evaluations/*/report.json')}
+    paths = {path for root in roots for path in (root / 'runs').glob('**/evaluations/*/report.json')}
     for path in sorted(paths):
         report = read_json(path)
         job = report['job']
@@ -143,16 +143,20 @@ def main(argv=None):
     for path in (path for root in roots for path in root.glob('plans/*.json')):
         for job in read_json(path)['jobs']:
             known[job['id']] = job
-    for path in (path for root in roots for path in root.glob('runs/*/job.json')):
+    for path in (path for root in roots for path in (root / 'runs').rglob('job.json')):
         job = read_json(path)
         known[job['id']] = job
     known = {key: job for key, job in known.items() if
              (not args.models or job['model'] in args.models) and
              (not args.benchmarks or job['benchmark'] in args.benchmarks)}
+    training_states = defaultdict(list)
+    for root in roots:
+        for path in (root / 'runs').rglob('training.json'):
+            state = read_json(path)
+            training_states[state['job']['id']].append(state.get('status'))
     states = []
     for key in known:
-        paths = [root / 'runs' / key / 'training.json' for root in roots]
-        saved = [read_json(path).get('status') for path in paths if path.exists()]
+        saved = training_states[key]
         states.append('complete' if 'complete' in saved else 'running' if 'running' in saved else 'pending')
     print(f'\nPlanned/saved training jobs: {len(known)} | complete: {states.count("complete")} | '
           f'partial: {states.count("running")} | pending: {states.count("pending")} | '

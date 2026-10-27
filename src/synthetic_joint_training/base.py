@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .training_data import bundle_for_job, select_training_rows
+from .paths import run_folder
 from .io import lock, write_json
 from .registry import register, resolve, verify_local
 
@@ -27,8 +28,8 @@ def train_bases(payload):
     with tqdm(jobs, desc='Joint LoRA training' if is_joint else 'Base LoRA training', position=0, unit='LoRA') as progress:
         for job in progress:
             progress.set_description(('Joint training | ' if is_joint else 'Base training | ') + description(job))
-            folder = root / 'runs' / job['id']
             with lock(root / '.locks' / f"{job['id']}.lock"):
+                folder = run_folder(root, job, migrate=True)
                 write_json(folder / 'job.json', job)
                 cached = completed(job, folder)
                 if not cached:
@@ -60,14 +61,17 @@ def evaluate_bases(payload):
         if manifest['id'] != job['benchmark_id']:
             raise ValueError('Dataset index changed after planning')
         root = Path(args.output_root if job['synthetic_id'] else args.base_output_root)
-        folder = root / 'runs' / job['id']
         with lock(root / '.locks' / f"{job['id']}.lock"):
+            folder = run_folder(root, job, migrate=True)
             if job.get('kind') == 'unadapted':
                 adapter = None
             elif job['synthetic_id']:
                 verify_local(folder, job)
                 adapter = folder / 'adapter'
             else:
+                if (folder / 'training.json').exists():
+                    verify_local(folder, job)
+                    register(args.registry, job, folder, reconcile=True)
                 adapter = resolve(args.registry, job) / 'adapter'
             return evaluate(job, evaluation, folder / 'evaluations', adapter, args, session=session)
     # Original references share the inference engine but are not counted as LoRAs.
