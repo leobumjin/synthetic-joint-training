@@ -2,6 +2,7 @@
 from pathlib import Path
 import importlib.metadata
 import gc
+import shutil
 
 from .data import validate_messages
 from .io import read_json, write_json, digest
@@ -126,11 +127,23 @@ def completed(job, output):
     return True
 
 
+def cleanup_checkpoints(job, output):
+    """Remove resume state only after final adapter integrity is verified."""
+    output = Path(output)
+    if completed(job, output):
+        checkpoints = output / 'checkpoints'
+        if checkpoints.exists():
+            if checkpoints.is_symlink():
+                raise ValueError('Refusing to remove a symlinked checkpoint directory')
+            shutil.rmtree(checkpoints)
+
+
 def train(job, rows, output, parent=None, resume=False, reference=None, session=None):
     cfg = job['recipe']
     output = Path(output)
     output.mkdir(parents=True, exist_ok=True)
     if completed(job, output):
+        cleanup_checkpoints(job, output)
         return
     from .plan import PROTOCOL, JOINT_PROTOCOL
     if job.get('training_mode') == 'joint' and parent is not None:
@@ -224,6 +237,7 @@ def train(job, rows, output, parent=None, resume=False, reference=None, session=
                      adapter_sha256=adapter_signature(output / 'adapter'),
                      observed_input_tokens=trainer.state.num_input_tokens_seen)
         write_json(output / 'training.json', state)
+        cleanup_checkpoints(job, output)
     finally:
         if progress is not None and progress.bar is not None:
             progress.bar.close()

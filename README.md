@@ -310,7 +310,7 @@ outputs_base_lora/                 # Reusable benchmark checkpoints and referenc
 │   ├── job.json
 │   ├── training.json
 │   ├── adapter/
-│   ├── checkpoints/
+│   ├── checkpoints/              # Incomplete runs only; removed after verified completion
 │   └── evaluations/
 └── hf_uploads.json                # Written by the upload-only script
 
@@ -320,7 +320,7 @@ outputs/                           # Joint LoRAs and optional repeat controls
 │   ├── job.json
 │   ├── training.json
 │   ├── adapter/
-│   ├── checkpoints/
+│   ├── checkpoints/              # Incomplete runs only; removed after verified completion
 │   └── evaluations/
 └── hf_uploads.json                # Written by the upload-only script
 ```
@@ -330,6 +330,18 @@ The base root also holds unadapted-model evaluations and B100 reference evaluati
 Override paths through `BASE_OUTPUT_ROOT` / `OUTPUT_ROOT`, or `--base-output-root` / `--output-root`. `run_base_lora.sh` writes to the base root; `run.sh` writes joint runs to the synthetic root and references to the base root. Run identities do not depend on these paths.
 
 `print_results.sh` searches both roots and pairs matching references across them. The uploader also searches both roots and registered local adapter paths. Identical copied reports are counted once. Existing mixed-root results remain readable and uploadable; files are not automatically moved. To resume base training in an older location, set `BASE_OUTPUT_ROOT` to that location.
+
+## Storage cleanup and server migration
+
+Run the normal base command again with the same model, data, and recipe settings:
+
+```bash
+bash shells/run_base_lora.sh
+```
+
+Completed LoRAs are verified and reused without retraining. Their intermediate `checkpoints/` directories, including optimizer state, are removed after the final adapter hash is verified. Newly completed runs perform the same cleanup automatically. Interrupted runs retain recovery checkpoints; use `--resume` to continue them. Completed evaluation reports are reused.
+
+Final `adapter/` files (including tokenizer files), `training.json`, `job.json`, and evaluation reports/predictions remain in the existing output directories. No export step is required. For migration, copy these output directories and `configs/base_lora_registry.json` into the same relative repository layout on the destination server. The default registry uses relative paths. Copy matching prepared `data/` separately if further training/evaluation is needed. Phase requests and locks are small runtime files and need not be transferred.
 
 ## Base LoRA training
 

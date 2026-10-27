@@ -205,9 +205,15 @@ def test_base_worker_keeps_one_training_session_and_skips_completed_jobs(tmp_pat
     assert events.count('load_model') == 1
     assert events.count('unload_without_merge') == 1
     assert len(read_json(args.registry)['adapters']) == 1
+    # Re-running the normal base command cleans legacy recovery checkpoints
+    # without loading or retraining the completed adapter.
+    checkpoints = args.base_output_root / 'runs' / jobs[0]['id'] / 'checkpoints'
+    write_json(checkpoints / 'checkpoint-1/optimizer.pt', {'fixture': True})
     before = list(events)
     train_bases(payload)
     assert events == before
+    assert not checkpoints.exists()
+    assert (checkpoints.parent / 'adapter/adapter_model.safetensors').exists()
     assert base.weight == 17
 
 

@@ -18,7 +18,7 @@ def description(job):
 
 def train_bases(payload):
     from tqdm.auto import tqdm
-    from .train import TrainingSession, completed, train
+    from .train import TrainingSession, cleanup_checkpoints, completed, train
     args = SimpleNamespace(**payload['args'])
     jobs = payload['jobs']
     is_joint = bool(jobs[0]['synthetic_id'])
@@ -37,6 +37,8 @@ def train_bases(payload):
                         bundles[key] = bundle_for_job(args.data_root, job)
                     selected, reference = select_training_rows(job, bundles[key])
                     train(job, selected, folder, resume=args.resume, reference=reference, session=session)
+                if cached:
+                    cleanup_checkpoints(job, folder)
                 if not is_joint:
                     register(args.registry, job, folder)
                 progress.set_postfix(status='cached' if cached else 'trained')
